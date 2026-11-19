@@ -1,6 +1,7 @@
-"""Check a records folder and write its INDEX.md and graph.json. Standard library only.
+"""Check a records folder and write its INDEX.md, DIGEST.md, graph.json and search index. Standard library only.
 
-    py records.py <records-folder>
+    py records.py <records-folder>                     # check, then write INDEX.md, DIGEST.md, graph.json, search.sqlite
+    py records.py search <records-folder> "<query>"    # BM25 search over ideas, run results and journals
 
 A records folder holds one Markdown file per idea in ideas/, each with front matter (see templates/TEMPLATE.md).
 Links between ideas (helps, related, blocked_by) must point at files that exist. Repo links are gh:owner/name or a full URL.
@@ -9,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -87,12 +89,51 @@ def index(ideas: dict, problems: list[str]) -> str:
     return "\n".join(out)
 
 
+def digest(ideas: dict) -> str:
+    """One line per idea, built by script (no LLM), so an agent gets the whole state in a few hundred tokens."""
+    order = lambda kv: (STATUSES.index(kv[1]["status"]) if kv[1]["status"] in STATUSES else 9, kv[0])  # noqa: E731
+    out = ["# Digest", "", "id | status | title | problems | last progress", ""]
+    for i, m in sorted(ideas.items(), key=order):
+        last = [ln for ln in m["body"].splitlines() if ln.startswith("- 20")]
+        out.append(f"{i} | {m['status']} | {m['title']} | {','.join(m['problems'])} | {last[-1][2:180] if last else ''}")
+    return "\n".join(out) + "\n"
+
+
+def index_search(root: Path, ideas: dict) -> None:
+    """BM25 full-text index (SQLite FTS5) over ideas, run results, MVP reports and night journals."""
+    db = root / "search.sqlite"
+    db.unlink(missing_ok=True)
+    con = sqlite3.connect(db)
+    con.execute("CREATE VIRTUAL TABLE docs USING fts5(path, title, body)")
+    rows = [(f"ideas/{i}.md", m["title"], m["body"]) for i, m in ideas.items()]
+    for f in [*root.glob("runs/*/result.json"), *root.glob("runs/*/mvp/REPORT.md"), *root.glob("journal/*.md")]:
+        rows.append((f.relative_to(root).as_posix(), f.parent.name, f.read_text(encoding="utf-8", errors="replace")))
+    con.executemany("INSERT INTO docs VALUES (?, ?, ?)", rows)
+    con.commit()
+    con.close()
+
+
+def search(root: Path, query: str, k: int = 5, budget: int = 1500) -> str:
+    """Top-k BM25 hits with snippets, capped at `budget` characters so the agent's context stays small."""
+    db = root / "search.sqlite"
+    terms = " OR ".join(f'"{w}"' for w in re.findall(r"[A-Za-z0-9]{3,}", query)[:30])
+    if not db.exists() or not terms:
+        return ""
+    con = sqlite3.connect(db)
+    hits = con.execute("SELECT path, title, snippet(docs, 2, '', '', ' ... ', 24) FROM docs WHERE docs MATCH ? "
+                       "ORDER BY bm25(docs) LIMIT ?", (terms, k)).fetchall()
+    con.close()
+    return "".join(f"- {p} ({t}): {' '.join(s.split())}\n" for p, t, s in hits)[:budget]
+
+
 def build(root: Path) -> int:
     ideas = {p.stem: parse(p) for p in sorted((root / "ideas").glob("*.md"))}
     problems = check(ideas)
     (root / "INDEX.md").write_text(index(ideas, problems), encoding="utf-8")
+    (root / "DIGEST.md").write_text(digest(ideas), encoding="utf-8")
     g = graph(ideas)
     (root / "graph.json").write_text(json.dumps(g, indent=1), encoding="utf-8")
+    index_search(root, ideas)
     print(f"{len(ideas)} ideas, {len(g['nodes'])} nodes, {len(g['edges'])} edges")
     for p in problems:
         print("CHECK:", p)
@@ -110,4 +151,7 @@ def _selftest() -> None:
 
 if __name__ == "__main__":
     _selftest()
-    sys.exit(build(Path(sys.argv[1]) if sys.argv[1:] else Path(".")))
+    if sys.argv[1:2] == ["search"]:
+        print(search(Path(sys.argv[2]), " ".join(sys.argv[3:])) or "no hits")
+    else:
+        sys.exit(build(Path(sys.argv[1]) if sys.argv[1:] else Path(".")))

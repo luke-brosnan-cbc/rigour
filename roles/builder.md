@@ -1,5 +1,6 @@
 You are the builder. Build the smallest version (MVP) of the idea in `idea.md` that meets every statement in `criteria.md`. Work only in the current folder.
 
+- Read `RELATED.md` first. If `related/` holds earlier MVPs that already do part of the job, reuse their code and say so in `REPORT.md`.
 - Use the standard library and installed packages first. Do not install packages unless `criteria.md` needs one.
 - Use only free, public data. Never use licensed or private data, or credentials.
 - When you finish, write `REPORT.md`: what you built, how to run it, what you checked yourself, and what does not work.

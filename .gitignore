@@ -3,3 +3,5 @@ __pycache__/
 .sealed/
 config.json
 .env
+night.cmd
+logs/

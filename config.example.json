@@ -1,17 +1,21 @@
 {
   "records": "~/research-records",
   "auto_commit": true,
-  "extra_plugin_dirs": [],
+  "max_call_minutes": 60,
   "agents": {
     "claude-a": { "kind": "claude", "env": {} },
     "claude-b": { "kind": "claude", "env": { "CLAUDE_CONFIG_DIR": "~/.claude-b" } },
     "codex":    { "kind": "codex",  "env": {} }
   },
   "roles": {
-    "scout": "claude-a",
-    "novelty2": "claude-b",
-    "referee": "claude-b",
-    "builder": "claude-a"
+    "scout":         { "agent": "claude-a", "model": "opus",   "effort": "high",   "fallback_model": "sonnet", "skills": ["vetted-idea-generation"] },
+    "novelty1":      { "agent": "claude-a", "model": "sonnet", "effort": "medium" },
+    "novelty2":      { "agent": "claude-b", "model": "sonnet", "effort": "medium" },
+    "tiebreak":      { "agent": "claude-b", "model": "opus",   "effort": "high",   "fallback_model": "sonnet" },
+    "referee_spec":  { "agent": "claude-b", "model": "opus",   "effort": "high",   "fallback_model": "sonnet" },
+    "builder":       { "agent": "claude-a", "model": "sonnet", "effort": "medium" },
+    "referee_judge": { "agent": "claude-b", "model": "opus",   "effort": "high",   "fallback_model": "sonnet" },
+    "synth":         { "agent": "claude-a", "model": "haiku",  "effort": "low" }
   },
   "fallback": { "codex": "claude-b" }
 }
