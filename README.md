@@ -1,4 +1,4 @@
-# research-agent
+# rigour
 
 An autonomous research loop that runs on the Claude Code and Codex command-line tools, on the subscriptions you already have. It finds ideas, tries to kill each one with a prior-art search, and tests the survivors with a small build. A different agent then judges the build against tests it wrote before the build started. Every result goes into a records folder of plain Markdown and JSON, so later runs (and other LLMs) can read, combine and build on it.
 

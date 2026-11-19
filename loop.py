@@ -1,4 +1,4 @@
-"""Research agent: scout ideas, check novelty twice, test them with sealed referee tests, record everything.
+"""rigour: scout ideas, check novelty twice, test them with sealed referee tests, record everything.
 
     py loop.py init                    # create the records folder (ideas/, runs/, CONTEXT.md, TEMPLATE.md)
     py loop.py scout "<topic>"         # new ideas into the records (status idea, or dropped with the prior art)
