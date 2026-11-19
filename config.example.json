@@ -1,0 +1,17 @@
+{
+  "records": "~/research-records",
+  "auto_commit": true,
+  "extra_plugin_dirs": [],
+  "agents": {
+    "claude-a": { "kind": "claude", "env": {} },
+    "claude-b": { "kind": "claude", "env": { "CLAUDE_CONFIG_DIR": "~/.claude-b" } },
+    "codex":    { "kind": "codex",  "env": {} }
+  },
+  "roles": {
+    "scout": "claude-a",
+    "novelty2": "claude-b",
+    "referee": "claude-b",
+    "builder": "claude-a"
+  },
+  "fallback": { "codex": "claude-b" }
+}
