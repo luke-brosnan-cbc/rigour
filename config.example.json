@@ -3,22 +3,6 @@
   "auto_commit": true,
   "max_call_minutes": 60,
   "task_name": "rigour-night",
-  "agents": {
-    "claude-a": {
-      "kind": "claude",
-      "env": {}
-    },
-    "claude-b": {
-      "kind": "claude",
-      "env": {
-        "CLAUDE_CONFIG_DIR": "~/.claude-b"
-      }
-    },
-    "codex": {
-      "kind": "codex",
-      "env": {}
-    }
-  },
   "roles": {
     "scout": {
       "agent": "claude-a",
@@ -74,5 +58,22 @@
   "budget": {
     "session_usd": 5,
     "day_usd": 10
+  },
+  "independence": "session",
+  "agents": {
+    "claude-a": {
+      "kind": "claude",
+      "env": {}
+    },
+    "claude-b": {
+      "kind": "claude",
+      "env": {
+        "CLAUDE_CONFIG_DIR": "~/.claude-b"
+      }
+    },
+    "codex": {
+      "kind": "codex",
+      "env": {}
+    }
   }
 }

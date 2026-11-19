@@ -11,7 +11,7 @@ Research agents and Claude/Codex orchestrators already exist. This project uses 
 - **Canaries.** `loop.py canary` takes an idea that the records already mark as existing, removes its prior art and lessons, and asks each novelty agent about it. `loop.py calibration` prints the catch rate per agent and model.
 - **Two independent novelty checks.** Two agents search for prior art in separate fresh sessions. If they disagree, a stronger model breaks the tie.
 - **Sealed tests.** The referee writes the criteria and the tests before the build. The builder sees the criteria only. The tests sit outside the builder's folder, the builder's file tools cannot leave its folder, and a hash stops the run if the tests change.
-- **Isolated agents.** Every call is a fresh session with `--safe-mode` (no CLAUDE.md, memory, hooks or plugins from your own setup) and `--restricted` (file tools stay in the working folder). Agents pass results as files, never through chat. The loop refuses to run if the referee and the builder are the same agent.
+- **Isolated agents.** Every call is a fresh session with `--safe-mode` (no CLAUDE.md, memory, hooks or plugins from your own setup) and `--restricted` (file tools stay in the working folder). Agents pass results as files, never through chat. Every role is its own agent, even on one account and one model.
 
 ## How a run works
 
@@ -79,7 +79,15 @@ Dropped ideas and failed runs stay in the index, so their lessons come back when
 ## Setup
 
 1. Install [Claude Code](https://code.claude.com) and log in.
-2. One Claude account is enough. Each role in `config.json` picks an agent (an account or CLI), a model, an effort level and skills. Independence comes from fresh, isolated sessions and from using a different model for the builder and the referee. The loop refuses to run if they share both account and model. A second account or Codex adds capacity and model diversity. To add a second Claude account, in PowerShell:
+2. One Claude account is enough. Each role in `config.json` picks an agent (an account or CLI), a model, an effort level and skills. Every role call is a separate agent: a fresh, isolated session with its own instructions and no memory of the other roles. The `independence` setting decides how strict to be:
+
+   | `independence` | Builder and referee must differ in |
+   |---|---|
+   | `session` (default) | Nothing more. Separate isolated sessions are enough. |
+   | `model` | Model or account |
+   | `account` | Account (or CLI, such as Codex) |
+
+   A stricter level reduces correlated mistakes. LLM judges tend to favour output from their own model ([Panickssery et al. 2024](https://arxiv.org/abs/2404.13076)). The sealed tests limit this, because the referee commits to its tests before it sees the build. Several accounts, or Codex, also add usage capacity. To add a second Claude account, in PowerShell:
    ```
    $env:CLAUDE_CONFIG_DIR = "$HOME\.claude-b"
    claude

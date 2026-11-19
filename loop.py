@@ -183,12 +183,21 @@ def novelty(run: Path, idea_text: str, roles=("novelty1", "novelty2")) -> dict:
     return out
 
 
+def check_independence() -> None:
+    """Every role is always a separate, fresh, isolated session. `independence` can demand more: a different model or account."""
+    level = CFG.get("independence", "session")
+    b, j = role_cfg("builder"), role_cfg("referee_judge")
+    if level == "account" and b["agent"] == j["agent"]:
+        raise SystemExit("config independence=account: builder and referee must use different accounts")
+    if level == "model" and (b["agent"], b["model"]) == (j["agent"], j["model"]):
+        raise SystemExit("config independence=model: builder and referee must differ in model or account")
+
+
 def run_idea(idea_id: str) -> Path:
     idea = (RECORDS / "ideas" / f"{idea_id}.md").read_text(encoding="utf-8")
     run = RUNS / f"{now()}-{idea_id}"
     run.mkdir(parents=True)
-    b, j = role_cfg("builder"), role_cfg("referee_judge")
-    assert (b["agent"], b["model"]) != (j["agent"], j["model"]), "builder and referee need a different account or model"
+    check_independence()
 
     print(f"1/5 novelty: two independent checks on {idea_id}")
     nov = novelty(run, idea)
