@@ -5,3 +5,4 @@ config.json
 .env
 night.cmd
 logs/
+config-*.json
