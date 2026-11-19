@@ -31,7 +31,9 @@ from pathlib import Path
 import records
 
 HERE = Path(__file__).resolve().parent
-CFG = json.loads((HERE / ("config.json" if (HERE / "config.json").exists() else "config.example.json")).read_text(encoding="utf-8"))
+CFG_FILE = Path(os.environ.get("RIGOUR_CONFIG") or (HERE / ("config.json" if (HERE / "config.json").exists() else "config.example.json")))
+CFG = json.loads(CFG_FILE.read_text(encoding="utf-8"))
+TASK = CFG.get("task_name", "rigour-night")
 RECORDS = Path(os.path.expanduser(os.environ.get("RECORDS") or CFG["records"]))
 RUNS = RECORDS / "runs"
 SHELL = "PowerShell" if os.name == "nt" else "Bash"
@@ -374,20 +376,21 @@ def add_link(src: str, dst: str, kind: str) -> None:
 
 
 def schedule(at: str, minutes: str = "60") -> None:
-    cmd_file = HERE / "night.cmd"
+    cmd_file = HERE / f"{TASK}.cmd"
     (HERE / "logs").mkdir(exist_ok=True)
-    cmd_file.write_text(f'@echo off\ncd /d "{HERE}"\n"{sys.executable}" loop.py night {minutes} >> "logs\\night.log" 2>&1\n',
-                        encoding="utf-8")
+    log = HERE / "logs" / f"{TASK}.log"
+    cmd_file.write_text(f'@echo off\ncd /d "{HERE}"\nset RIGOUR_CONFIG={CFG_FILE}\n'
+                        f'"{sys.executable}" loop.py night {minutes} >> "{log}" 2>&1\n', encoding="utf-8")
     if os.name != "nt":
-        return print(f"Add this line with `crontab -e`:\n{at[3:5]} {at[:2]} * * * cd {HERE} && {sys.executable} loop.py night {minutes} >> logs/night.log 2>&1")
-    subprocess.run(["schtasks", "/Create", "/F", "/SC", "DAILY", "/ST", at, "/TN", "rigour-night", "/TR", f'"{cmd_file}"'], check=True)
-    print(f"Scheduled: every day at {at}, {minutes} minutes. Log: {HERE / 'logs' / 'night.log'}. "
-          "The computer must be on, awake and logged in.")
+        return print(f"Add this line with `crontab -e`:\n{at[3:5]} {at[:2]} * * * cd {HERE} && "
+                     f"RIGOUR_CONFIG={CFG_FILE} {sys.executable} loop.py night {minutes} >> {log} 2>&1")
+    subprocess.run(["schtasks", "/Create", "/F", "/SC", "DAILY", "/ST", at, "/TN", TASK, "/TR", f'"{cmd_file}"'], check=True)
+    print(f"Scheduled {TASK}: every day at {at}, {minutes} minutes. Log: {log}. The computer must be on, awake and logged in.")
 
 
 def unschedule() -> None:
     if os.name == "nt":
-        subprocess.run(["schtasks", "/Delete", "/F", "/TN", "rigour-night"], check=False)
+        subprocess.run(["schtasks", "/Delete", "/F", "/TN", TASK], check=False)
     else:
         print("Remove the line with `crontab -e`.")
 

@@ -67,6 +67,17 @@ The design follows what current evidence says about agent cost:
 4. Copy `config.example.json` to `config.json`. Set `records` to the folder for your outputs, ideally a private git repo.
 5. Run `py loop.py init`, then edit `CONTEXT.md` in the records folder.
 
+### Several instances
+
+You can run separate instances, for example one for personal research and one for work, each with its own records repo. Make a second config file with its own `records` and `task_name`. Then select it with the `RIGOUR_CONFIG` environment variable:
+
+```
+$env:RIGOUR_CONFIG = "C:\path\to\config-work.json"
+py loop.py schedule 02:00 60
+```
+
+The scheduled task keeps its config. If a records folder links to repos on another host, add `links.json` to that folder, for example `{"gitea": "https://git.example.com/"}`. Then `gitea:owner/name` links pass the checks.
+
 ## Commands
 
 ```

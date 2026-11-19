@@ -35,10 +35,14 @@ def parse(path: Path) -> dict:
     return meta
 
 
+PREFIXES = {"gh": "https://github.com/"}  # a records folder can add more in links.json, e.g. {"gitea": "https://host/"}
+
+
 def link(ref: str) -> str:
     if ref.startswith(("http://", "https://")):
         return ref
-    return f"https://github.com/{ref[3:]}" if ref.startswith("gh:") else ""
+    kind, _, name = ref.partition(":")
+    return PREFIXES[kind] + name if kind in PREFIXES and name else ""
 
 
 def check(ideas: dict) -> list[str]:
@@ -51,7 +55,7 @@ def check(ideas: dict) -> list[str]:
             problems.append(f"{i}: status '{m.get('status')}' is not one of {STATUSES}")
         for f in ("helps", "related", "blocked_by"):
             problems += [f"{i}: {f} -> '{t}' has no file in ideas/" for t in m[f] if t not in ideas]
-        problems += [f"{i}: repo '{r}' must be gh:owner/name or a full URL" for r in m["repos"] if not link(r)]
+        problems += [f"{i}: repo '{r}' must be a full URL or use a prefix from {sorted(PREFIXES)}" for r in m["repos"] if not link(r)]
     return problems
 
 
@@ -127,6 +131,8 @@ def search(root: Path, query: str, k: int = 5, budget: int = 1500) -> str:
 
 
 def build(root: Path) -> int:
+    if (root / "links.json").exists():
+        PREFIXES.update(json.loads((root / "links.json").read_text(encoding="utf-8")))
     ideas = {p.stem: parse(p) for p in sorted((root / "ideas").glob("*.md"))}
     problems = check(ideas)
     (root / "INDEX.md").write_text(index(ideas, problems), encoding="utf-8")
@@ -146,6 +152,7 @@ def _selftest() -> None:
     found = check(ideas)
     assert any("'b' has no file" in p for p in found), found
     assert any("'bad' must be" in p for p in found), found
+    assert link("gitea:o/r") == "" and link("gh:") == ""
     assert link("gh:o/r") == "https://github.com/o/r" and link("https://x.org/y") == "https://x.org/y"
 
 
