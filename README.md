@@ -22,6 +22,17 @@ Research agents and Claude/Codex orchestrators already exist. This project uses 
 5. **Referee** checks the seal, runs its tests, reproduces the result and writes `verdict.json`.
 6. **Record**: the loop appends a dated line to the idea, sets its status, rebuilds the index, digest, graph and search index, and commits the records repo.
 
+## Tracks
+
+`CONTEXT.md` can hold several tracks, each a section named `## Track: <name>`, for example one for work and one for a portfolio. Put the track name first to research only that track:
+
+```
+py loop.py night 30 portfolio
+py loop.py scout work ideas about input-output tables
+```
+
+The scout gets the shared sections plus that one track, and it tags each idea with the track name. The session then tests only ideas with that tag. Without a track name, the scout may use all tracks and tags each idea with the one it fits.
+
 ## Sessions and scheduling
 
 ```

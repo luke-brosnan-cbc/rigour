@@ -215,8 +215,7 @@ def run_idea(idea_id: str) -> Path:
     spec = HERE / ".sealed" / run.name  # outside the records tree; the builder's file tools cannot reach it
     spec.mkdir(parents=True)
     (spec / "idea.md").write_text(idea, encoding="utf-8")
-    if (RECORDS / "CONTEXT.md").exists():
-        shutil.copy(RECORDS / "CONTEXT.md", spec)
+    write_context(spec, track_of(idea))
     related(spec, idea)
     call("referee_spec", spec, tools=["Read", "Write", "Edit", "Glob", "Grep", *WEB, *PY])
     criteria = (spec / "criteria.md").read_text(encoding="utf-8")
@@ -274,13 +273,55 @@ def add_ideas(folder: Path) -> list[str]:
     return added
 
 
-def scout(topic: str) -> list[str]:
-    ws = RUNS / f"{now()}-scout"
+def tracks() -> list[str]:
+    """Track names, from `## Track: <name>` headings in CONTEXT.md."""
+    ctx = RECORDS / "CONTEXT.md"
+    return [t.lower() for t in re.findall(r"^## Track: (\S+)", ctx.read_text(encoding="utf-8"), re.M)] if ctx.exists() else []
+
+
+def split_track(text: str) -> tuple[str | None, str]:
+    """'cv', 'CV idea' or 'oe ideas about X' -> (track, rest of the topic)."""
+    words = text.split()
+    if not words or words[0].lower() not in tracks():
+        return None, text
+    rest = words[1:]
+    if rest and rest[0].lower() in ("idea", "ideas"):
+        rest = rest[1:]
+    if rest and rest[0].lower() in ("about", "on", "for"):
+        rest = rest[1:]
+    return words[0].lower(), " ".join(rest)
+
+
+def track_of(idea_text: str) -> str | None:
+    m = re.search(r"^tags: \[(.*)\]", idea_text, re.M)
+    tags = {t.strip().lower() for t in m.group(1).split(",")} if m else set()
+    return next((t for t in tracks() if t in tags), None)
+
+
+def write_context(ws: Path, track: str | None) -> None:
+    """Copy CONTEXT.md with the shared sections and only the chosen track's section (all tracks if None)."""
+    ctx = RECORDS / "CONTEXT.md"
+    if not ctx.exists():
+        return
+    parts = re.split(r"(?m)^(?=## )", ctx.read_text(encoding="utf-8"))
+    head = lambda p: p.split("\n", 1)[0].strip().lower()  # noqa: E731
+    keep = [p for p in parts if track is None or not head(p).startswith("## track: ") or head(p) == f"## track: {track}"]
+    (ws / "CONTEXT.md").write_text("".join(keep), encoding="utf-8")
+
+
+def scout(topic: str, track: str | None = None) -> list[str]:
+    ws = RUNS / (f"{now()}-scout" + (f"-{track}" if track else ""))
     (ws / "out").mkdir(parents=True)
-    for f in ("CONTEXT.md", "DIGEST.md", "TEMPLATE.md"):
+    for f in ("DIGEST.md", "TEMPLATE.md"):
         if (RECORDS / f).exists():
             shutil.copy(RECORDS / f, ws)
-    task = topic or "Use the topics in CONTEXT.md."
+    write_context(ws, track)
+    if track:
+        task = (f"Track: {track}. Generate ideas only for the 'Track: {track}' section of CONTEXT.md, and put `{track}` "
+                f"in each idea's tags." + (f" Topic: {topic}" if topic else ""))
+    else:
+        task = (topic or "Use the topics in CONTEXT.md.") + (
+            f" Put the matching track name ({', '.join(tracks())}) in each idea's tags." if tracks() else "")
     related(ws, task)
     call("scout", ws, task=task)
     added = add_ideas(ws / "out")
@@ -320,15 +361,21 @@ def calibration() -> None:
         print(f"{agent}: caught {sum(r['caught'] == 'True' for r in mine)}/{len(mine)} canaries")
 
 
-def untested() -> list[str]:
-    """Ideas with status 'idea' and no run yet, oldest first."""
-    ideas = [p for p in (RECORDS / "ideas").glob("*.md") if re.search(r"^status: idea$", p.read_text(encoding="utf-8"), re.M)]
-    ideas = [p for p in ideas if "run `" not in p.read_text(encoding="utf-8")]
-    return [p.stem for p in sorted(ideas, key=lambda p: p.stat().st_mtime)]
+def untested(track: str | None = None) -> list[str]:
+    """Ideas with status 'idea', no run yet and (if given) the track's tag, oldest first."""
+    out = []
+    for p in sorted((RECORDS / "ideas").glob("*.md"), key=lambda p: p.stat().st_mtime):
+        text = p.read_text(encoding="utf-8")
+        if (re.search(r"^status: idea\s*(#.*)?$", text, re.M) and not re.search(r"run `\d{8}-\d{4}-", text)
+                and (track is None or track_of(text) == track)):
+            out.append(p.stem)
+    return out
 
 
 def session(topic: str = "", cycles: int | None = None, minutes: float | None = None) -> None:
     """The unattended loop. A new idea starts only before the deadline; the one in progress always finishes."""
+    track, topic = split_track(topic)
+    print(f"Track: {track or 'all'}" + (f", topic: {topic}" if topic else ""))
     start = datetime.now()
     stamp = start.strftime("%Y-%m-%d %H:%M")
     deadline = time.time() + 60 * minutes if minutes else float("inf")
@@ -342,10 +389,10 @@ def session(topic: str = "", cycles: int | None = None, minutes: float | None = 
                   + f", {spent(stamp):.2f} USD so far")
             if c % 3 == 0:
                 canary(1)
-            queue = untested()
+            queue = untested(track)
             if len(queue) < 2 and go():
-                scout(topic)
-                queue = untested()
+                scout(topic, track)
+                queue = untested(track)
             if not queue or not go():
                 break
             try:
@@ -462,7 +509,8 @@ def init() -> None:
 if __name__ == "__main__":
     cmd, *args = sys.argv[1:] or ["help"]
     num = lambda i, d: float(args[i]) if len(args) > i else d  # noqa: E731
-    {"init": init, "scout": lambda: scout(" ".join(args)), "run": lambda: run_idea(args[0]),
+    t, rest = split_track(" ".join(args if cmd == "scout" else args[1:]))
+    {"init": init, "scout": lambda: scout(rest, t), "run": lambda: run_idea(args[0]),
      "canary": lambda: canary(int(num(0, 1))), "calibration": calibration,
      "auto": lambda: session(" ".join(args[1:]), cycles=int(num(0, 3))),
      "night": lambda: session(" ".join(args[1:]), minutes=num(0, 60)),
