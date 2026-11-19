@@ -280,7 +280,7 @@ def tracks() -> list[str]:
 
 
 def split_track(text: str) -> tuple[str | None, str]:
-    """'cv', 'CV idea' or 'oe ideas about X' -> (track, rest of the topic)."""
+    """'work', 'Work idea' or 'portfolio ideas about X' -> (track, rest of the topic)."""
     words = text.split()
     if not words or words[0].lower() not in tracks():
         return None, text
