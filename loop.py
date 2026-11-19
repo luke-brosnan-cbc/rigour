@@ -42,7 +42,7 @@ PY = [f"{SHELL}(python *)", f"{SHELL}(py *)", f"{SHELL}(pytest *)"]
 ROLE_FILES = {"novelty1": "novelty.md", "novelty2": "novelty.md", "tiebreak": "novelty.md", "scout": "scout.md",
               "referee_spec": "referee-spec.md", "builder": "builder.md", "referee_judge": "referee-judge.md", "synth": "synth.md"}
 METRICS = ["date", "run", "role", "agent", "model", "cost_usd", "input", "output", "cache_read", "cache_write",
-           "web_searches", "seconds", "error"]
+           "web_searches", "seconds", "error", "tokens_total"]
 now = lambda fmt="%Y%m%d-%H%M": datetime.now().strftime(fmt)  # noqa: E731
 
 
@@ -91,14 +91,24 @@ def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -
                "--tools", ",".join(sorted({t.split("(")[0] for t in tools})), "--allowed-tools", *tools]
         if r.get("fallback_model"):
             cmd += ["--fallback-model", r["fallback_model"]]
-    else:  # shortcut: codex flags untested (no codex on the first dev machine), check `codex exec --help`
-        cmd = ["codex", "exec", "--skip-git-repo-check", "-s", "workspace-write", "-C", str(cwd), "-m", r["model"], prompt]
+    else:
+        # Codex: give it its own CODEX_HOME in config.json so your AGENTS.md is not loaded. --ephemeral: no saved session.
+        # workspace-write limits writes to cwd; reads are not confined. The prompt goes in on stdin ("-").
+        cmd = [shutil.which("codex") or "codex", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-rules",
+               "-s", "workspace-write", "-C", str(cwd),
+               "-c", 'web_search="live"' if any(t in WEB for t in tools) else 'web_search="disabled"',
+               "-c", f'model_reasoning_effort="{r.get("effort", "medium")}"']
+        if os.name == "nt":
+            cmd += ["-c", 'windows.sandbox="unelevated"']
+        if r.get("model") not in (None, "", "default"):
+            cmd += ["-m", r["model"]]
+        cmd.append("-")
     print(f"  [{role}: {r['agent']}/{r['model']}] in {cwd.name}", flush=True)
     t0 = time.time()
-    p = subprocess.run(cmd, cwd=cwd, env=env, timeout=60 * CFG.get("max_call_minutes", 60),
-                       capture_output=True, text=True, encoding="utf-8")
+    p = subprocess.run(cmd, cwd=cwd, env=env, timeout=60 * CFG.get("max_call_minutes", 60), capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", input=None if a["kind"] == "claude" else prompt)
     (cwd / f"_{role}.log").write_text(p.stdout + "\n--- stderr ---\n" + p.stderr, encoding="utf-8")
-    log_metrics(cwd, role, r, p.stdout, time.time() - t0)
+    log_metrics(cwd, role, r, p.stdout, time.time() - t0, p.stderr)
     # shortcut: matches the limit message text, which Claude Code may change; check _<role>.log if a stop looks wrong
     failed = p.returncode != 0 or re.search(r'"is_error"\s*:\s*true', p.stdout)
     if failed and re.search(r"usage limit|rate limit|limit reached|out of (extra )?usage", p.stdout[-2000:] + p.stderr[-2000:], re.I):
@@ -107,22 +117,28 @@ def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -
         raise SystemExit(f"{role} ({r['agent']}) failed (exit {p.returncode}); see {cwd / f'_{role}.log'}")
 
 
-def log_metrics(cwd: Path, role: str, r: dict, stdout: str, seconds: float) -> None:
+def log_metrics(cwd: Path, role: str, r: dict, stdout: str, seconds: float, stderr: str = "") -> None:
+    vals = [""] * 7
     try:
         d = json.loads(stdout)
         u = d.get("usage", {})
         vals = [d.get("total_cost_usd"), u.get("input_tokens"), u.get("output_tokens"), u.get("cache_read_input_tokens"),
                 u.get("cache_creation_input_tokens"), u.get("server_tool_use", {}).get("web_search_requests"), d.get("is_error")]
+        total = sum(int(u.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
     except (json.JSONDecodeError, AttributeError):
-        vals = [""] * 7  # codex, or a crash before any output
+        m = re.search(r"tokens used\s*([\d,]+)", stderr + stdout)  # Codex prints its total; it reports no cost
+        total = int(m.group(1).replace(",", "")) if m else ""
     run = cwd.relative_to(RUNS).parts[0] if RUNS in cwd.parents else cwd.name
     path = RECORDS / "metrics.csv"
+    if path.exists() and "tokens_total" not in path.read_text(encoding="utf-8").split("\n", 1)[0]:
+        rows = path.read_text(encoding="utf-8").splitlines()  # add the column to files from older versions
+        path.write_text("\n".join([rows[0] + ",tokens_total", *[x + "," for x in rows[1:]]]) + "\n", encoding="utf-8")
     new = not path.exists()
     with open(path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new:
             w.writerow(METRICS)
-        w.writerow([now("%Y-%m-%d %H:%M"), run, role, r["agent"], r["model"], *vals[:6], round(seconds), vals[6]])
+        w.writerow([now("%Y-%m-%d %H:%M"), run, role, r["agent"], r["model"], *vals[:6], round(seconds), vals[6], total])
 
 
 def read_json(path: Path) -> dict:

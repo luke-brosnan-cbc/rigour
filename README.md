@@ -104,7 +104,12 @@ Dropped ideas and failed runs stay in the index, so their lessons come back when
    claude
    ```
    Run `/login` with the second account, then exit. On macOS or Linux use `CLAUDE_CONFIG_DIR=~/.claude-b claude`. Then set some roles to `claude-b`.
-3. Optional, Codex: `npm install -g @openai/codex`, then `codex login`. Set a role's agent to `codex` in `config.json`. If Codex is missing, those roles fall back to `claude-b`. The Codex call is not tested yet.
+3. Optional, Codex: `npm install -g @openai/codex`. Give rigour its own Codex home, so that your global `AGENTS.md`, memories and hooks are not loaded. Log in there once:
+   ```
+   $env:CODEX_HOME = "$HOME\.codex-rigour"
+   codex login
+   ```
+   Then set roles to the `codex` agent in `config.json`. Codex as the referee and the second novelty check, with Claude as the builder, gives the strongest independence (`"independence": "account"`). Use `"model": "default"` for Codex's default model. If Codex is not on the PATH, those roles use the `fallback` agent. Codex reports tokens but no cost, so budget caps count Claude calls only.
 4. Copy `config.example.json` to `config.json`. Set `records` to the folder for your outputs, ideally a private git repo.
 5. Run `py loop.py init`, then edit `CONTEXT.md` in the records folder.
 
@@ -165,7 +170,8 @@ This project borrows ideas, not code, from these projects:
 - Anthropic allows `claude -p` in your own scripts. It does not allow third-party tools to use your subscription login. Scripted use may count against a separate monthly credit pool. Check the current terms for your plan. Use one account per person. Do not share or resell access.
 - `--restricted` keeps the file tools in the working folder, but the builder can still run Python, and Python can open any file. Run the loop on a machine and account where that is acceptable, or in a container.
 - Canaries so far are known-existing ideas only. They measure misses, not false alarms on new ideas.
-- The Codex call, the scheduler and the usage-limit stop are not tested yet.
+- Codex's `workspace-write` sandbox limits writes to the working folder but not reads. A Codex builder could read the sealed tests, so prefer Codex as the referee.
+- The scheduler and the usage-limit stop are not tested yet.
 
 ## Licence
 
