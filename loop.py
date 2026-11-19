@@ -46,6 +46,26 @@ METRICS = ["date", "run", "role", "agent", "model", "cost_usd", "input", "output
 now = lambda fmt="%Y%m%d-%H%M": datetime.now().strftime(fmt)  # noqa: E731
 
 
+class Stop(Exception):
+    """End the session cleanly (usage limit or budget), without blaming the idea in progress."""
+
+
+def spent(since: str) -> float:
+    """USD-equivalent logged in metrics.csv since a 'YYYY-MM-DD HH:MM' stamp."""
+    if not (RECORDS / "metrics.csv").exists():
+        return 0.0
+    return sum(float(r["cost_usd"] or 0) for r in csv.DictReader(open(RECORDS / "metrics.csv", encoding="utf-8")) if r["date"] >= since)
+
+
+def over_budget(session_start: str) -> str:
+    b = CFG.get("budget", {})
+    if b.get("session_usd") and spent(session_start) >= b["session_usd"]:
+        return f"session budget of {b['session_usd']} USD reached"
+    if b.get("day_usd") and spent(now("%Y-%m-%d")) >= b["day_usd"]:
+        return f"daily budget of {b['day_usd']} USD reached"
+    return ""
+
+
 def role_cfg(role: str) -> dict:
     r = dict(CFG["roles"][role])
     if CFG["agents"][r["agent"]]["kind"] == "codex" and not shutil.which("codex"):
@@ -79,6 +99,10 @@ def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -
                        capture_output=True, text=True, encoding="utf-8")
     (cwd / f"_{role}.log").write_text(p.stdout + "\n--- stderr ---\n" + p.stderr, encoding="utf-8")
     log_metrics(cwd, role, r, p.stdout, time.time() - t0)
+    # shortcut: matches the limit message text, which Claude Code may change; check _<role>.log if a stop looks wrong
+    failed = p.returncode != 0 or re.search(r'"is_error"\s*:\s*true', p.stdout)
+    if failed and re.search(r"usage limit|rate limit|limit reached|out of (extra )?usage", p.stdout[-2000:] + p.stderr[-2000:], re.I):
+        raise Stop(f"{r['agent']} hit a usage limit during {role}")
     if p.returncode:
         raise SystemExit(f"{role} ({r['agent']}) failed (exit {p.returncode}); see {cwd / f'_{role}.log'}")
 
@@ -132,7 +156,15 @@ def commit(message: str) -> None:
 def related(ws: Path, query: str, copy_mvps: int = 0) -> None:
     """Give the agent RELATED.md (top BM25 hits, about 1,500 characters) and, optionally, copies of related earlier MVPs."""
     hits = records.search(RECORDS, query)
-    (ws / "RELATED.md").write_text("# Related earlier records\n\n" + (hits or "None found.\n"), encoding="utf-8")
+    # one-hop graph expansion: ideas linked (helps/related/blocked_by) to the top idea hits, as digest lines
+    linked, digest = set(), {}
+    if (RECORDS / "graph.json").exists() and (RECORDS / "DIGEST.md").exists():
+        top = set(re.findall(r"ideas/([^.\s]+)\.md", hits))
+        edges = json.loads((RECORDS / "graph.json").read_text(encoding="utf-8"))["edges"]
+        linked = {e["to"] for e in edges if e["from"] in top and e["type"] in ("helps", "related", "blocked_by")} - top
+        digest = {ln.split(" | ")[0]: ln for ln in (RECORDS / "DIGEST.md").read_text(encoding="utf-8").splitlines() if " | " in ln}
+    extra = "".join(f"- linked: {digest[i][:240]}\n" for i in sorted(linked) if i in digest)
+    (ws / "RELATED.md").write_text("# Related earlier records\n\n" + (hits or "None found.\n") + extra, encoding="utf-8")
     for n, run in enumerate(dict.fromkeys(re.findall(r"runs/([^/\s]+)/", hits))):
         if n >= copy_mvps:
             break
@@ -155,7 +187,8 @@ def run_idea(idea_id: str) -> Path:
     idea = (RECORDS / "ideas" / f"{idea_id}.md").read_text(encoding="utf-8")
     run = RUNS / f"{now()}-{idea_id}"
     run.mkdir(parents=True)
-    assert role_cfg("builder")["agent"] != role_cfg("referee_judge")["agent"], "referee and builder must be different agents"
+    b, j = role_cfg("builder"), role_cfg("referee_judge")
+    assert (b["agent"], b["model"]) != (j["agent"], j["model"]), "builder and referee need a different account or model"
 
     print(f"1/5 novelty: two independent checks on {idea_id}")
     nov = novelty(run, idea)
@@ -288,27 +321,36 @@ def untested() -> list[str]:
 def session(topic: str = "", cycles: int | None = None, minutes: float | None = None) -> None:
     """The unattended loop. A new idea starts only before the deadline; the one in progress always finishes."""
     start = datetime.now()
+    stamp = start.strftime("%Y-%m-%d %H:%M")
     deadline = time.time() + 60 * minutes if minutes else float("inf")
+    go = lambda: time.time() < deadline and not over_budget(stamp)  # noqa: E731  checked before anything new starts
     rebuild()  # orient: fresh digest and search index before any agent runs
     c = 0
-    while time.time() < deadline and (cycles is None or c < cycles):
-        c += 1
-        print(f"=== cycle {c}" + (f", {round((deadline - time.time()) / 60)} min left" if minutes else ""))
-        if c % 3 == 0:
-            canary(1)
-        queue = untested()
-        if len(queue) < 2 and time.time() < deadline:
-            scout(topic)
+    try:
+        while go() and (cycles is None or c < cycles):
+            c += 1
+            print(f"=== cycle {c}" + (f", {round((deadline - time.time()) / 60)} min left" if minutes else "")
+                  + f", {spent(stamp):.2f} USD so far")
+            if c % 3 == 0:
+                canary(1)
             queue = untested()
-        if not queue or time.time() >= deadline:
-            break
-        try:
-            run_idea(queue[0])
-        except (SystemExit, subprocess.TimeoutExpired) as e:  # one failed run must not stop the night
-            print(f"  run failed: {e}")
-            failed = RUNS / f"{now()}-{queue[0]}-error"
-            failed.mkdir(parents=True, exist_ok=True)
-            record(queue[0], failed, {"verdict": "error", "lessons": f"Run error: {e}"})
+            if len(queue) < 2 and go():
+                scout(topic)
+                queue = untested()
+            if not queue or not go():
+                break
+            try:
+                run_idea(queue[0])
+            except (SystemExit, subprocess.TimeoutExpired) as e:  # one failed run must not stop the night
+                print(f"  run failed: {e}")
+                failed = RUNS / f"{now()}-{queue[0]}-error"
+                failed.mkdir(parents=True, exist_ok=True)
+                record(queue[0], failed, {"verdict": "error", "lessons": f"Run error: {e}"})
+    except Stop as e:
+        print(f"Stopping early: {e}. The idea in progress stays untested and goes first next time.")
+        commit(f"session stopped: {e}")
+        return  # no synthesis call when the account is out of usage
+    print(f"Session ends: {over_budget(stamp) or 'time or cycles used up'}")
     synthesise(start)
 
 

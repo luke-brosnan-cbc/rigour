@@ -54,15 +54,37 @@ The design follows what current evidence says about agent cost:
 
 `metrics.csv` logs every call: role, agent, model, cost (USD-equivalent), tokens (with cache), web searches and seconds. Use it to compare sessions and to tune the role models in `config.json`.
 
+### Budgets and limits
+
+Set caps in `config.json`:
+
+```json
+"budget": { "session_usd": 5, "day_usd": 10 }
+```
+
+The loop checks the caps before it starts anything new, the same way it checks the time limit. The cost is the USD-equivalent that Claude Code reports. On a subscription it measures usage and is not a bill. If an account hits its usage limit, the session stops at once. The idea in progress stays untested and goes first next time.
+
+[ccusage](https://github.com/ryoppippi/ccusage) reads Claude Code's saved session logs. rigour runs with `--no-session-persistence`, so ccusage does not see its calls. Use `metrics.csv` instead. It has the same numbers per call, plus the role and the run.
+
+### How the context is built
+
+Each agent gets a small, fixed set of files, cheapest first:
+
+1. `DIGEST.md`: one line per idea, built by script, a few hundred tokens for the whole state.
+2. `RELATED.md`: the top 5 BM25 hits for the task (ideas, run results, MVP reports, journals), capped at about 1,500 characters. Ideas linked to those hits in `graph.json` are added as one digest line each, so a related idea is found even when it shares no keywords.
+3. `related/`: for the builder only, copies of up to two related earlier MVPs to reuse.
+
+Dropped ideas and failed runs stay in the index, so their lessons come back when a similar idea appears. Hybrid BM25 plus embeddings scores higher on recall in one benchmark ([agentmemory](https://github.com/rohitg00/agentmemory/blob/main/benchmark/COMPARISON.md): 95% against 86% recall@5). It needs an embedding model, so it is a possible next step, not a default.
+
 ## Setup
 
 1. Install [Claude Code](https://code.claude.com) and log in.
-2. Optional, a second Claude account for the referee. In PowerShell:
+2. One Claude account is enough. Each role in `config.json` picks an agent (an account or CLI), a model, an effort level and skills. Independence comes from fresh, isolated sessions and from using a different model for the builder and the referee. The loop refuses to run if they share both account and model. A second account or Codex adds capacity and model diversity. To add a second Claude account, in PowerShell:
    ```
    $env:CLAUDE_CONFIG_DIR = "$HOME\.claude-b"
    claude
    ```
-   Run `/login` with the second account, then exit. On macOS or Linux use `CLAUDE_CONFIG_DIR=~/.claude-b claude`. Without it, point the `claude-b` roles at `claude-a` in `config.json`. The builder and the referee must still be different agents, so use Codex or a second account for one of them.
+   Run `/login` with the second account, then exit. On macOS or Linux use `CLAUDE_CONFIG_DIR=~/.claude-b claude`. Then set some roles to `claude-b`.
 3. Optional, Codex: `npm install -g @openai/codex`, then `codex login`. Set a role's agent to `codex` in `config.json`. If Codex is missing, those roles fall back to `claude-b`. The Codex call is not tested yet.
 4. Copy `config.example.json` to `config.json`. Set `records` to the folder for your outputs, ideally a private git repo.
 5. Run `py loop.py init`, then edit `CONTEXT.md` in the records folder.
@@ -115,6 +137,7 @@ This project borrows ideas, not code, from these projects:
 - [claude-codex-collab](https://github.com/AlessioZazzarini/claude-codex-collab) (MIT) and [cross-review](https://github.com/lploc94/cross-review) (MIT): Claude and Codex on subscriptions, reviewing each other.
 - [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc): OpenAI's Codex plugin for Claude Code.
 - [agentmemory](https://github.com/rohitg00/agentmemory): BM25 and vector retrieval benchmarks for agent memory.
+- [karpathy/autoresearch](https://github.com/karpathy/autoresearch) and its descendants ([awesome-autoresearch](https://github.com/yibie/awesome-autoresearch)): the modify, measure, keep-or-discard loop. [CORAL](https://github.com/Human-Agent-Society/CORAL) (Apache-2.0) runs Claude Code, Codex or OpenCode workers in parallel worktrees with grading and a shared hub of notes. [helix](https://github.com/VectorInstitute/helix) (Apache-2.0) adds reproducible, agent-agnostic research repos with append-only ledgers. These tools optimise a metric that you choose. rigour works one level up: which ideas are new and worth a metric at all, and whether the novelty checks can be trusted. An idea that passes rigour and has a clear metric is a good candidate for a CORAL or helix loop.
 - [ponytail](https://github.com/DietrichGebert/ponytail) and [ste80-humanizer](https://github.com/Dodaios/ste80-humanizer): skills that suit the builder and the write-ups.
 
 ## Rules and limits
@@ -123,7 +146,7 @@ This project borrows ideas, not code, from these projects:
 - Anthropic allows `claude -p` in your own scripts. It does not allow third-party tools to use your subscription login. Scripted use may count against a separate monthly credit pool. Check the current terms for your plan. Use one account per person. Do not share or resell access.
 - `--restricted` keeps the file tools in the working folder, but the builder can still run Python, and Python can open any file. Run the loop on a machine and account where that is acceptable, or in a container.
 - Canaries so far are known-existing ideas only. They measure misses, not false alarms on new ideas.
-- The Codex call and the scheduler are not tested yet.
+- The Codex call, the scheduler and the usage-limit stop are not tested yet.
 
 ## Licence
 
