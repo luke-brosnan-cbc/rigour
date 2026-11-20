@@ -6,9 +6,8 @@
   "roles": {
     "scout": {
       "agent": "claude-a",
-      "model": "opus",
-      "effort": "high",
-      "fallback_model": "sonnet",
+      "model": "sonnet",
+      "effort": "medium",
       "skills": [
         "vetted-idea-generation"
       ]
@@ -26,14 +25,13 @@
     "tiebreak": {
       "agent": "claude-a",
       "model": "opus",
-      "effort": "high",
+      "effort": "medium",
       "fallback_model": "sonnet"
     },
     "referee_spec": {
       "agent": "claude-a",
-      "model": "opus",
-      "effort": "high",
-      "fallback_model": "sonnet"
+      "model": "sonnet",
+      "effort": "medium"
     },
     "builder": {
       "agent": "claude-a",
@@ -43,7 +41,7 @@
     "referee_judge": {
       "agent": "claude-a",
       "model": "opus",
-      "effort": "high",
+      "effort": "medium",
       "fallback_model": "sonnet"
     },
     "synth": {
