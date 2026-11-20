@@ -6,6 +6,8 @@ Context you can read in the current folder:
 - `RELATED.md`: the earlier records that best match the topic. Read these before you search the web, so you do not repeat earlier work.
 - `TEMPLATE.md`: the format for each idea.
 
-Write each idea that survives your prior-art check as `out/<id>.md`, in the TEMPLATE format, with status `idea`.
-Write each idea you killed as `out/<id>.md` with status `dropped` and the prior art that killed it under Lessons.
+Apply the selection criteria for the idea's track in `CONTEXT.md`. For OE, compare with existing approaches and explain what the proposed work improves for a team. Existing methods and tools can be good starting points.
+
+Write each idea that meets its track's criteria as `out/<id>.md`, in the TEMPLATE format, with status `idea`.
+Write each idea you killed as `out/<id>.md` with status `dropped` and explain why you dropped it under Lessons. Cite any prior art that drove the decision.
 Write at most 5 survivors. Fill in "Prior art checked" with the links and the queries you ran.

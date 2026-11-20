@@ -358,6 +358,7 @@ def check_independence() -> None:
 
 def run_idea(idea_id: str) -> Path:
     idea = (RECORDS / "ideas" / f"{idea_id}.md").read_text(encoding="utf-8")
+    track = track_of(idea)
     run = RUNS / f"{now()}-{idea_id}"
     run.mkdir(parents=True)
     check_independence()
@@ -376,9 +377,9 @@ def run_idea(idea_id: str) -> Path:
     verdict = decisive[0]["verdict"]
     matches = [hit for check in decisive for hit in check.get("closest", [])
                if hit.get("matches") and hit.get("url")]
-    if verdict == "exists" and matches:
+    if track != "oe" and verdict == "exists" and matches:
         return record(idea_id, run, {"verdict": "exists", "novelty": nov})
-    if verdict != "novel":
+    if track != "oe" and verdict != "novel":
         return record(idea_id, run, {"verdict": "review", "novelty": nov,
                                    "lessons": "Review the cited prior art before building or dropping this idea."})
 
@@ -386,7 +387,7 @@ def run_idea(idea_id: str) -> Path:
     spec = HERE / ".sealed" / run.name  # outside the records tree; the builder's file tools cannot reach it
     spec.mkdir(parents=True)
     (spec / "idea.md").write_text(idea, encoding="utf-8")
-    write_context(spec, track_of(idea))
+    write_context(spec, track)
     related(spec, idea)
     call("referee_spec", spec, tools=["Read", "Write", "Edit", "Glob", "Grep", *WEB, *PY, *R])
     criteria = (spec / "criteria.md").read_text(encoding="utf-8")
@@ -550,6 +551,10 @@ def scout(topic: str, track: str | None = None) -> list[str]:
     else:
         task = (topic or "Use the topics in CONTEXT.md.") + (
             f" Put the matching track name ({', '.join(tracks())}) in each idea's tags." if tracks() else "")
+    if track == "oe" or (track is None and "oe" in tracks()):
+        task += ("\nFor OE ideas, use the search steps in the vetted-idea-generation skill. "
+                 "Apply the OE adoption criteria in CONTEXT.md when deciding what survives. "
+                 "An existing tool or method can support a proposal with a useful, testable adoption plan.")
     related(ws, task)
     call("scout", ws, task=task)
     added = add_ideas(ws / "out")
