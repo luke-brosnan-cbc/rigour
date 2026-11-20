@@ -36,8 +36,8 @@ The scout gets the shared sections plus that one track, and it tags each idea wi
 ## Sessions and scheduling
 
 ```
-py loop.py night 60                 # run for 60 minutes, then synthesise
-py loop.py auto 5                   # run 5 cycles, then synthesise
+py loop.py night 60                 # start work for up to 60 minutes, then report
+py loop.py auto 5                   # run 5 cycles, then report
 py loop.py schedule 01:00 60        # every night at 01:00, for 60 minutes
 py loop.py unschedule
 ```
@@ -46,7 +46,8 @@ A session works like this:
 
 1. **Orient.** Rebuild the digest and the search index. No LLM is used.
 2. **Cycle** until the time is up. Run the scout if fewer than 2 ideas wait. Test the oldest untested idea. Run a canary every third cycle. A new idea starts only before the deadline. The idea in progress always finishes. A failed run parks its idea, and the session goes on.
-3. **Synthesise.** One cheap-model call reads a script-built summary of the session (runs, canaries, cost against earlier sessions). It writes a journal entry, adds links between related ideas, and proposes at most 2 combined ideas.
+3. **Report.** Rigour prints the verdicts, referee evidence, and usage totals. It writes the same report to `journal/`. Run `py loop.py synthesise` for an agent-written journal and related ideas, or set `"auto_synthesis": true` in your config to run it after each session.
+4. **Continue partial runs.** Use `py loop.py resume <idea-id>` to copy the last partial MVP, add regression tests for the reported defects, and make one repair attempt. The referee runs the original tests and the new tests. Each attempt has its own run directory.
 4. **Commit and push** the records.
 
 `schedule` uses Windows Task Scheduler (`schtasks`), or prints a cron line on macOS and Linux. The computer must be on, awake and logged in at that time. Output goes to `logs/night.log`.
@@ -75,14 +76,14 @@ Set caps in `config.json`:
 
 The loop checks the caps before it starts anything new, the same way it checks the time limit.
 
-- `five_hour_pct` and `seven_day_pct` use your real subscription usage. Claude Code reports it in a `rate_limit_event` on every call, and Codex writes it to its saved session files. `metrics.csv` logs both percentages on every call. These are the best caps on a Pro or Max plan.
+- Rigour prints the account, reported 5-hour and weekly usage, and dollar estimate as each agent call finishes. The cycle header shows cumulative Claude USD-equivalent and the last reported percentages for each account used by the configuration. The percentages are account-wide. Claude Code supplies them through rate-limit events. Codex supplies them through saved session files. A missing reading appears as `unavailable`. Values the provider reported are saved in `metrics.csv`.
 - `session_usd` and `day_usd` use the USD-equivalent that Claude Code reports at list prices. On a subscription it measures usage and is not a bill. Codex reports no cost, so these caps count Claude calls only.
 
 If an account reports that its limit is reached, the session stops at once. The idea in progress stays untested and goes first next time.
 
 ```
 py loop.py usage        # last logged 5-hour and weekly usage per agent
-py loop.py usage now    # live reading: one tiny call per agent
+py loop.py usage now    # request a fresh reading with one small call per active account
 ```
 
 [ccusage](https://github.com/ryoppippi/ccusage) reads Claude Code's saved session logs. rigour runs with `--no-session-persistence`, so ccusage does not see its calls. Use `py loop.py usage` and `metrics.csv` instead.
@@ -140,6 +141,7 @@ The scheduled task keeps its config. If a records folder links to repos on anoth
 py loop.py scout "nowcasting regional activity with free data"
 py loop.py run <idea-id>
 py loop.py canary 3
+py loop.py resume <idea-id>
 py loop.py calibration
 py loop.py synthesise
 py records.py search <records-folder> "<query>"
