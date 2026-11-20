@@ -71,10 +71,10 @@ The design follows what current evidence says about agent cost:
 Set caps in `config.json`:
 
 ```json
-"budget": { "session_usd": 5, "day_usd": 10, "five_hour_pct": 80, "seven_day_pct": 60 }
+"budget": { "session_usd": 5, "day_usd": 10, "five_hour_pct": null, "seven_day_pct": null }
 ```
 
-The loop checks the caps before it starts anything new, the same way it checks the time limit.
+The loop checks the caps before starting new work. Subscription percentage caps are off by default. Set `five_hour_pct` or `seven_day_pct` to a percentage to reserve part of that allowance. Omit the key or use `null` to turn its cap off.
 
 - Rigour prints the account, reported 5-hour and weekly usage, and dollar estimate as each agent call finishes. The cycle header shows cumulative Claude USD-equivalent and the last reported percentages for each account used by the configuration. The percentages are account-wide. Claude Code supplies them through rate-limit events. Codex supplies them through saved session files. A missing reading appears as `unavailable`. Values the provider reported are saved in `metrics.csv`.
 - `session_usd` and `day_usd` use the USD-equivalent that Claude Code reports at list prices. On a subscription it measures usage and is not a bill. Codex reports no cost, so these caps count Claude calls only.
