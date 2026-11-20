@@ -1,6 +1,6 @@
 <p align="center"><img src="docs/logo.svg" alt="rigour" width="300"></p>
 
-<p align="center"><b>An overnight research loop that tries to kill your ideas before you build them.</b></p>
+<p align="center"><b>An autonomous research loop that tries to kill your ideas before you build them.</b></p>
 
 rigour runs on the Claude Code and Codex CLIs, on the subscriptions you already pay for. It scouts ideas, checks each one against papers, code and products, and builds a small MVP of the survivors. A separate referee then judges each build against tests it wrote and sealed before the build started. Every verdict, test and lesson lands in your own records repo, so the next night starts smarter than the last.
 
