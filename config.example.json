@@ -1,6 +1,8 @@
 {
   "records": "~/research-records",
   "adoption_tracks": [],
+  "scout_survivors": 3,
+  "duplicate_threshold": 0.35,
   "auto_commit": true,
   "max_call_minutes": 60,
   "task_name": "rigour-night",
@@ -46,6 +48,11 @@
       "fallback_model": "sonnet"
     },
     "synth": {
+      "agent": "claude-a",
+      "model": "haiku",
+      "effort": "low"
+    },
+    "triage": {
       "agent": "claude-a",
       "model": "haiku",
       "effort": "low"

@@ -2,7 +2,7 @@
 
     py loop.py init                     # create the records folder (ideas/, runs/, CONTEXT.md, TEMPLATE.md)
     py loop.py scout "<topic>"          # new ideas into the records (status idea, or dropped with the prior art)
-    py loop.py run <idea-id>            # novelty x2 (+ tie-break) -> referee tests -> build -> judge -> record
+    py loop.py run <idea-id>            # novelty x2 (+ tie-break) -> triage -> referee tests -> build -> judge -> record
     py loop.py resume <idea-id>          # repair the most recent partial run and judge it again
     py loop.py canary [n]               # plant n known (dropped) ideas, check the novelty agents catch them
     py loop.py calibration              # canary catch rate per agent
@@ -41,6 +41,12 @@ if CFG_FILE.exists():
     CFG |= json.loads(CFG_FILE.read_text(encoding="utf-8-sig"))  # -sig: PowerShell 5.1 writes a BOM
 
 
+def merge(cfg: dict, over: dict) -> dict:
+    """Override settings; dict values (roles, agents, budget) merge one level deep."""
+    return {**cfg, **{k: {**cfg[k], **v} if isinstance(v, dict) and isinstance(cfg.get(k), dict) else v
+                      for k, v in over.items()}}
+
+
 def locate(spec: str) -> Path:
     """The records folder: a local path, or a git remote (URL or gh:owner/repo) cloned to ~/.rigour/<name> and pulled."""
     if spec.startswith("gh:"):
@@ -57,7 +63,7 @@ def locate(spec: str) -> Path:
 
 RECORDS = locate(os.environ.get("RECORDS") or CFG["records"])
 if (RECORDS / "rigour.json").exists():  # your own settings travel with your records
-    CFG |= json.loads((RECORDS / "rigour.json").read_text(encoding="utf-8"))
+    CFG = merge(CFG, json.loads((RECORDS / "rigour.json").read_text(encoding="utf-8-sig")))
 TASK = CFG.get("task_name", "rigour-night")
 ADOPT = {t.lower() for t in CFG.get("adoption_tracks", [])}  # tracks where novelty is optional
 RUNS = RECORDS / "runs"
@@ -65,7 +71,7 @@ SHELL = "PowerShell" if os.name == "nt" else "Bash"
 WEB = ["WebSearch", "WebFetch"]
 PY = [f"{SHELL}(python *)", f"{SHELL}(py *)", f"{SHELL}(pytest *)"]
 R = [f"{SHELL}(Rscript *)", f"{SHELL}(Rscript.exe *)"]
-ROLE_FILES = {"novelty1": "novelty.md", "novelty2": "novelty.md", "tiebreak": "novelty.md", "scout": "scout.md",
+ROLE_FILES = {"novelty1": "novelty.md", "novelty2": "novelty.md", "tiebreak": "novelty.md", "scout": "scout.md", "triage": "triage.md",
               "referee_spec": "referee-spec.md", "builder": "builder.md", "referee_judge": "referee-judge.md", "synth": "synth.md"}
 METRICS = ["date", "run", "role", "agent", "model", "cost_usd", "input", "output", "cache_read", "cache_write",
            "web_searches", "seconds", "error", "tokens_total", "five_hour_pct", "seven_day_pct"]
@@ -248,7 +254,7 @@ def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -
     cost = (u.get("result") or {}).get("total_cost_usd")
     price = f"USD-equivalent ${cost:.3f}" if cost is not None else "USD-equivalent unavailable"
     print(f"  [{role} complete] {r['agent']} | {usage_text(u['five'], u['seven'])} | {price}", flush=True)
-    if u.get("status", "allowed") != "allowed":
+    if u.get("status", "allowed") not in ("allowed", "allowed_warning"):  # warning = near the limit, still usable
         raise Stop(f"{r['agent']} reports its usage limit as '{u['status']}' during {role}")
     # shortcut: matches the limit message text, which the CLIs may change; check _<role>.log if a stop looks wrong
     failed = p.returncode != 0 or u.get("result", {}).get("is_error")
@@ -385,25 +391,41 @@ def run_idea(idea_id: str) -> Path:
     run.mkdir(parents=True)
     check_independence()
 
-    print(f"1/5 novelty: two independent checks on {idea_id}")
-    nov = novelty(run, idea)
-    verdicts = {v["verdict"] for v in nov.values()}
-    decisive = list(nov.values())
-    if len(verdicts) > 1:
-        print("    the checks disagree: tie-break")
-        task = ("Assess both earlier checks below. Open the decisive sources yourself. "
-                "Explain which core feature they already deliver and what gap remains.\n"
-                + json.dumps(nov, indent=2))
-        nov.update(novelty(run, idea, ("tiebreak",), task=task))
-        decisive = [nov["tiebreak"]]
-    verdict = decisive[0]["verdict"]
-    matches = [hit for check in decisive for hit in check.get("closest", [])
-               if hit.get("matches") and hit.get("url")]
-    if track not in ADOPT and verdict == "exists" and matches:
-        return record(idea_id, run, {"verdict": "exists", "novelty": nov})
-    if track not in ADOPT and verdict != "novel":
-        return record(idea_id, run, {"verdict": "review", "novelty": nov,
-                                   "lessons": "Review the cited prior art before building or dropping this idea."})
+    nov = {}
+    if track in ADOPT:  # novelty does not gate an adoption track, and the scout already searched prior art
+        print(f"1/5 novelty: skipped, {track} is an adoption track")
+    else:
+        print(f"1/5 novelty: two independent checks on {idea_id}")
+        nov = novelty(run, idea)
+        verdicts = {v["verdict"] for v in nov.values()}
+        decisive = list(nov.values())
+        if len(verdicts) > 1:
+            print("    the checks disagree: tie-break")
+            task = ("Assess both earlier checks below. Open the decisive sources yourself. "
+                    "Explain which core feature they already deliver and what gap remains.\n"
+                    + json.dumps(nov, indent=2))
+            nov.update(novelty(run, idea, ("tiebreak",), task=task))
+            decisive = [nov["tiebreak"]]
+        verdict = decisive[0]["verdict"]
+        matches = [hit for check in decisive for hit in check.get("closest", [])
+                   if hit.get("matches") and hit.get("url")]
+        if verdict == "exists" and matches:
+            return record(idea_id, run, {"verdict": "exists", "novelty": nov})
+        if verdict != "novel":
+            return record(idea_id, run, {"verdict": "review", "novelty": nov,
+                                         "lessons": "Review the cited prior art before building or dropping this idea."})
+
+    if "triage" in CFG["roles"]:  # one cheap call before the referee and builder, the expensive steps
+        print("   triage: is it worth a build?")
+        ws = run / "triage"
+        ws.mkdir()
+        (ws / "idea.md").write_text(idea, encoding="utf-8")
+        (ws / "novelty.json").write_text(json.dumps(nov, indent=1), encoding="utf-8")
+        write_context(ws, track)
+        call("triage", ws, tools=["Read", "Write"])
+        t = read_json(ws / "triage.json")
+        if not t.get("build"):
+            return record(idea_id, run, {"verdict": "skip", "novelty": nov, "lessons": f"Triage: {t.get('reason', '')}"})
 
     print("2/5 referee writes criteria and sealed tests")
     spec = HERE / ".sealed" / run.name  # outside the records tree; the builder's file tools cannot reach it
@@ -503,7 +525,7 @@ def record(idea_id: str, run: Path, v: dict) -> Path:
     line = f"- {now('%Y-%m-%d')}: run `{run.name}`: {v['verdict']}{tests}. Novelty ({nov}). {v.get('lessons', '')}".rstrip() + "\n"
     path = RECORDS / "ideas" / f"{idea_id}.md"
     text = re.sub(r"^updated: .*$", f"updated: {now('%Y-%m-%d')}", path.read_text(encoding="utf-8"), count=1, flags=re.M)
-    status = {"works": "prototype", "exists": "dropped", "review": "parked", "error": "parked"}.get(v["verdict"])
+    status = {"works": "prototype", "exists": "dropped", "review": "parked", "error": "parked", "skip": "parked"}.get(v["verdict"])
     if status:
         text = re.sub(r"^status: .*$", f"status: {status}", text, count=1, flags=re.M)
     path.write_text(text.rstrip("\n") + "\n" + line, encoding="utf-8")
@@ -513,13 +535,37 @@ def record(idea_id: str, run: Path, v: dict) -> Path:
     return run
 
 
+def words(idea_text: str) -> set[str]:
+    """Content words of an idea's title and problem, for a cheap duplicate check."""
+    title = re.search(r"^title: (.*)$", idea_text, re.M)
+    problem = idea_text.split("## Problem", 1)[1].split("\n## ", 1)[0] if "## Problem" in idea_text else ""
+    return {w for w in re.findall(r"[a-z0-9]+", ((title.group(1) if title else "") + " " + problem).lower()) if len(w) > 3}
+
+
+def near_duplicate(idea_text: str, threshold: float | None = None) -> str | None:
+    """The existing idea whose words overlap most (Jaccard), if the overlap reaches the threshold. No LLM."""
+    threshold = CFG.get("duplicate_threshold", 0.35) if threshold is None else threshold
+    mine, best = words(idea_text), (0.0, None)
+    for p in (RECORDS / "ideas").glob("*.md"):
+        other = words(p.read_text(encoding="utf-8"))
+        if mine and other:
+            best = max(best, (len(mine & other) / len(mine | other), p.stem), key=lambda b: b[0])
+    return best[1] if best[0] >= threshold else None
+
+
 def add_ideas(folder: Path) -> list[str]:
     added = []
     for p in sorted(folder.glob("*.md")):
         if (RECORDS / "ideas" / p.name).exists():
             print(f"  skip {p.name}: already in the records")
             continue
-        shutil.copy(p, RECORDS / "ideas" / p.name)
+        text = p.read_text(encoding="utf-8")
+        dup = near_duplicate(text) if re.search(r"^status: idea", text, re.M) else None
+        if dup:  # caught before any agent spends on it
+            print(f"  {p.stem}: near-duplicate of {dup}, recorded as dropped")
+            text = re.sub(r"^status: .*$", "status: dropped", text, count=1, flags=re.M)
+            text = text.rstrip("\n") + f"\n- {now('%Y-%m-%d')}: dropped before testing, near-duplicate of `{dup}`.\n"
+        (RECORDS / "ideas" / p.name).write_text(text, encoding="utf-8")
         added.append(p.stem)
     return added
 
@@ -578,6 +624,7 @@ def scout(topic: str, track: str | None = None) -> list[str]:
         task += (f"\nFor {', '.join(adopt)} ideas novelty is optional. Use the search steps in the vetted-idea-generation "
                  "skill, then apply that track's adoption criteria in CONTEXT.md when deciding what survives. "
                  "An existing tool or method can support a proposal with a useful, testable adoption plan.")
+    task += f"\nWrite at most {CFG.get('scout_survivors', 3)} survivors."
     related(ws, task)
     call("scout", ws, task=task)
     added = add_ideas(ws / "out")

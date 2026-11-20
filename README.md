@@ -65,6 +65,8 @@ py loop.py schedule 01:00 120          # every night at 01:00
 py loop.py usage now                   # live 5-hour and weekly usage per account
 ```
 
+The expensive part of a run is the referee and the builder, so rigour spends as little as possible before them. A word-overlap check with no LLM drops near-duplicate ideas as the scout returns them. The scout keeps at most `scout_survivors` ideas (default 3). Adoption tracks skip the novelty stage because it would not decide anything there. Then one Haiku call, the triage, reads each idea and decides whether a build would teach anything new. A typical triage costs about $0.002.
+
 A cycle tests the oldest untested idea and scouts more when fewer than two are waiting. Every third cycle runs a canary. If an account reports that it hit its usage limit, the session stops cleanly, and the idea in progress goes first next time. `metrics.csv` logs the cost, tokens and time of every call. You can set budget caps in USD or in subscription percentage.
 
 ## What a records repo holds
@@ -91,6 +93,6 @@ Agents never get the whole history. A local BM25 index (`records.py`, no LLM) gi
 
 ## Credits
 
-rigour borrows ideas, not code, from [AI Scientist](https://www.nature.com/articles/s41586-026-10265-5), [TrustResearcher](https://arxiv.org/abs/2510.20844), [claudexor](https://github.com/razzant/claudexor), [omc-codex](https://github.com/jhcdev/omc-codex), [cross-review](https://github.com/lploc94/cross-review), [agentmemory](https://github.com/rohitg00/agentmemory) and [karpathy/autoresearch](https://github.com/karpathy/autoresearch). Tools like [CORAL](https://github.com/Human-Agent-Society/CORAL) and [helix](https://github.com/VectorInstitute/helix) optimise a metric you choose. rigour works one level up: it decides which ideas are new and worth a metric at all.
+rigour borrows ideas, not code, from [AI Scientist](https://www.nature.com/articles/s41586-026-10265-5) (cheap similarity checks before costly work), [AI-Researcher](https://github.com/NoviScl/AI-Researcher) (LLM-free deduplication before the novelty check), [TrustResearcher](https://arxiv.org/abs/2510.20844), [claudexor](https://github.com/razzant/claudexor), [omc-codex](https://github.com/jhcdev/omc-codex), [cross-review](https://github.com/lploc94/cross-review), [agentmemory](https://github.com/rohitg00/agentmemory) and [karpathy/autoresearch](https://github.com/karpathy/autoresearch). Tools like [CORAL](https://github.com/Human-Agent-Society/CORAL) and [helix](https://github.com/VectorInstitute/helix) optimise a metric you choose. rigour works one level up: it decides which ideas are new and worth a metric at all.
 
 MIT licence.

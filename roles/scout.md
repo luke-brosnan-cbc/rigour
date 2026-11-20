@@ -10,4 +10,4 @@ Apply the selection criteria for the idea's track in `CONTEXT.md`. If the track 
 
 Write each idea that meets its track's criteria as `out/<id>.md`, in the TEMPLATE format, with status `idea`.
 Write each idea you killed as `out/<id>.md` with status `dropped` and explain why you dropped it under Lessons. Cite any prior art that drove the decision.
-Write at most 5 survivors. Fill in "Prior art checked" with the links and the queries you ran.
+Write no more survivors than the task allows. Fill in "Prior art checked" with the links and the queries you ran.
