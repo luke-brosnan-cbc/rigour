@@ -280,6 +280,8 @@ def usage(probe: bool = False) -> None:
                 p = subprocess.run(cmd, input="Reply with the single word ok.", env=env, capture_output=True, text=True,
                                    encoding="utf-8", errors="replace", timeout=300, cwd=HERE)
                 u = codex_usage(env.get("CODEX_HOME") or os.path.expanduser("~/.codex"), t0, p.stderr + "\n" + p.stdout)
+            log_metrics(Path("usage-probe"), "probe", {"agent": name, "model": "haiku" if a["kind"] == "claude" else "default"},
+                        u, time.time() - t0, p.stderr + "\n" + p.stdout)  # so the budget check sees fresh numbers
             resets = u["resets"]
             windows = ", ".join(f"{label} resets {datetime.fromtimestamp(resets[key]).strftime('%a %H:%M')}"
                                 for key, label in (("five_hour", "5-hour"), ("seven_day", "weekly")) if resets.get(key))
@@ -621,6 +623,8 @@ def session(topic: str = "", cycles: int | None = None, minutes: float | None = 
     deadline = time.time() + 60 * minutes if minutes else float("inf")
     go = lambda: time.time() < deadline and not over_budget(stamp)  # noqa: E731  checked before anything new starts
     rebuild()  # orient: fresh digest and search index before any agent runs
+    if over_budget(stamp):  # logged usage may be hours old and only agent calls refresh it; probe before giving up
+        usage(probe=True)
     canary_pool = dropped_ideas()
     c = 0
     try:
