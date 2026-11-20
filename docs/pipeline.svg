@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 236" width="900" height="236" role="img" aria-labelledby="t d">
+  <title id="t">How a rigour run works</title>
+  <desc id="d">Scout, then two novelty checks with a tie-break, then triage, then the referee writes sealed tests, the builder makes the MVP without seeing them, and the referee judges. Results go to the records repo, which feeds the next scout.</desc>
+  <style>
+    :root { --bg: #ffffff; --box: #f6f8fa; --edge: #d0d7de; --text: #1f2328; --muted: #59636e; --accent: #0969da; --gate: #fff8c5; --gate-edge: #d4a72c; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0d1117; --box: #161b22; --edge: #3d444d; --text: #e6edf3; --muted: #9198a1; --accent: #4493f8; --gate: #2e2a1a; --gate-edge: #9e7a1b; }
+    }
+    .bg { fill: var(--bg); }
+    .box { fill: var(--box); stroke: var(--edge); stroke-width: 1.2; }
+    .gate { fill: var(--gate); stroke: var(--gate-edge); stroke-width: 1.2; }
+    .rec { fill: var(--box); stroke: var(--accent); stroke-width: 1.6; }
+    .name { font: 600 14px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--text); text-anchor: middle; }
+    .sub { font: 12px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--muted); text-anchor: middle; }
+    .line { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+    .back { stroke: var(--accent); stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
+    .head { fill: var(--muted); }
+    .head-back { fill: var(--accent); }
+  </style>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="head-back" d="M0,0 L10,5 L0,10 z"/></marker>
+  </defs>
+  <rect class="bg" width="900" height="236" rx="8"/>
+
+  <rect class="box" x="20" y="24" width="120" height="64" rx="8"/>
+  <text class="name" x="80" y="51">Scout</text><text class="sub" x="80" y="70">new ideas</text>
+
+  <rect class="box" x="168" y="24" width="120" height="64" rx="8"/>
+  <text class="name" x="228" y="51">Novelty</text><text class="sub" x="228" y="70">two checks</text>
+
+  <rect class="gate" x="316" y="24" width="120" height="64" rx="8"/>
+  <text class="name" x="376" y="51">Triage</text><text class="sub" x="376" y="70">worth a build?</text>
+
+  <rect class="box" x="464" y="24" width="120" height="64" rx="8"/>
+  <text class="name" x="524" y="51">Referee</text><text class="sub" x="524" y="70">sealed tests</text>
+
+  <rect class="box" x="612" y="24" width="120" height="64" rx="8"/>
+  <text class="name" x="672" y="51">Builder</text><text class="sub" x="672" y="70">tests unseen</text>
+
+  <rect class="box" x="760" y="24" width="120" height="64" rx="8"/>
+  <text class="name" x="820" y="51">Referee</text><text class="sub" x="820" y="70">judges the MVP</text>
+
+  <path class="line" marker-end="url(#a)" d="M140,56 H166"/>
+  <path class="line" marker-end="url(#a)" d="M288,56 H314"/>
+  <path class="line" marker-end="url(#a)" d="M436,56 H462"/>
+  <path class="line" marker-end="url(#a)" d="M584,56 H610"/>
+  <path class="line" marker-end="url(#a)" d="M732,56 H758"/>
+
+  <rect class="rec" x="250" y="150" width="400" height="60" rx="8"/>
+  <text class="name" x="450" y="175">Records repo</text>
+  <text class="sub" x="450" y="194">verdicts, tests and lessons, in plain Markdown</text>
+
+  <path class="line" marker-end="url(#a)" d="M820,88 V180 H652"/>
+  <path class="back" marker-end="url(#b)" d="M248,180 H80 V90"/>
+  <text class="sub" x="164" y="172">lessons, related work</text>
+</svg>
