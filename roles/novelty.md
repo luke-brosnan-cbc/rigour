@@ -11,4 +11,4 @@ Write `novelty.json` in the current folder, and nothing else:
  "queries": ["...", "..."],
  "confidence": 0.0-1.0}
 
-Do not read any other file than `idea.md`. Do not guess URLs: list only pages you opened.
+Read only `idea.md` and, if it is there, `hits.json`: results of a quick API search. Use it as a head start, not a verdict. Do not guess URLs: list only pages you opened.

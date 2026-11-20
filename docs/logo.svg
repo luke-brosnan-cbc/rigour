@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 330 96" width="330" height="96" role="img" aria-label="rigour">
+  <style>
+    :root { --ink: #1f2328; --accent: #0969da; --pass: #1a7f37; }
+    @media (prefers-color-scheme: dark) { :root { --ink: #e6edf3; --accent: #4493f8; --pass: #3fb950; } }
+    .lens { fill: none; stroke: var(--accent); stroke-width: 7; }
+    .handle { stroke: var(--accent); stroke-width: 10; stroke-linecap: round; }
+    .tick { fill: none; stroke: var(--pass); stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; }
+    .word { font: 700 54px -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--ink); letter-spacing: -1px; }
+  </style>
+  <circle class="lens" cx="42" cy="42" r="28"/>
+  <line class="handle" x1="63" y1="63" x2="82" y2="82"/>
+  <polyline class="tick" points="29,43 39,53 56,32"/>
+  <text class="word" x="100" y="64">rigour</text>
+</svg>

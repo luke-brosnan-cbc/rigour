@@ -69,6 +69,7 @@ Settings that hold a set of values (`roles`, `agents`, `budget`) merge one level
 | `adoption_tracks` | `[]` | Tracks where novelty does not decide anything |
 | `scout_survivors` | `3` | The maximum number of ideas that one scout keeps |
 | `duplicate_threshold` | `0.35` | The word overlap at which a new idea counts as a duplicate |
+| `prior_art` | arXiv, Semantic Scholar, GitHub, 5 each | The search APIs for the pre-check, and the hits per source |
 | `budget` | `session_usd` 5, `day_usd` 10 | Spending caps. See [Budgets and usage](#budgets-and-usage). |
 | `independence` | `session` | How different the builder and the referee must be |
 | `auto_commit` | `true` | Commit and push the records repo after each step |
@@ -85,6 +86,7 @@ Each role is a separate agent: a fresh, isolated session with its own instructio
 | Role | Default model | Job |
 |---|---|---|
 | `scout` | Sonnet | Generates ideas and drops the ones with clear prior art |
+| `precheck` | Haiku | Reads the free search results and stops ideas with a clear match |
 | `novelty1`, `novelty2` | Sonnet, Opus | Two independent prior-art checks |
 | `tiebreak` | Opus | Decides when the two checks disagree |
 | `triage` | Haiku | Decides if a build is worth the time |
@@ -93,7 +95,7 @@ Each role is a separate agent: a fresh, isolated session with its own instructio
 | `referee_judge` | Opus | Runs the tests and writes the verdict |
 | `synth` | Haiku | Writes the session journal |
 
-Use `"model": "default"` for Codex's default model. To skip triage, remove it from `roles`.
+Use `"model": "default"` for Codex's default model. To skip the pre-check or triage, remove that role from `roles`.
 
 ### Independence
 
@@ -126,7 +128,9 @@ On a normal track, novelty decides: an idea that already exists stops after the 
 
 `py loop.py run <idea-id>` tests one idea in these steps:
 
-1. Novelty. Two agents search for prior art in separate sessions. If they disagree, the tie-break model decides. An idea that exists stops here. Adoption tracks skip this step.
+1. Novelty. First, the pre-check searches the free APIs and one Haiku call reads the hits. A clear match stops the idea here. Otherwise, two agents search for prior art in separate sessions. Both get the same hits as a head start. If they disagree, the tie-break model decides. An idea that exists stops here.
+
+   Adoption tracks skip this step.
 2. Triage. One Haiku call reads the idea, the track's criteria and the novelty results. It decides if a build would teach anything new. A typical triage costs about $0.002.
 3. Referee spec. The referee writes `criteria.md`, `holdout.md` and pytest tests. The tests go in `.sealed/`, outside the builder's folder.
 4. Build. The builder gets the criteria, the related records and up to two related earlier MVPs. It never sees the tests.
@@ -134,6 +138,21 @@ On a normal track, novelty decides: an idea that already exists stops after the 
 6. Record. rigour adds a dated line to the idea, sets its status, rebuilds the index and commits.
 
 Before any of this, the scout step drops near-duplicate ideas. It compares the words of each new idea with the existing records. It uses no LLM.
+
+## Free prior-art search
+
+`search.py` queries public APIs with no LLM. It builds the query from the idea's title. If an AND-style search finds nothing, it drops keywords and tries again. If a source fails or hits a rate limit, rigour skips it and the run continues.
+
+| Source | Key | Environment variable |
+|---|---|---|
+| arXiv | not needed | none |
+| Semantic Scholar | optional, raises the rate limit | `S2_API_KEY` |
+| OpenAlex | needed for more than a few calls a day | `OPENALEX_API_KEY` |
+| GitHub repositories | optional, raises the rate limit | `GITHUB_TOKEN` |
+
+Put keys in environment variables only, never in a settings file. To add OpenAlex, list it in `prior_art.sources`. To try a search by hand, run `py search.py "<title>"`.
+
+The pre-check says "exists" only when a hit delivers the core feature itself. A paper that describes a method does not count as software that implements it. The pre-check misses new or niche packages, because PyPI has no search API. The agent search catches those. Canaries record the pre-check's catch rate under `precheck/<model>`.
 
 ## Sessions and scheduling
 
