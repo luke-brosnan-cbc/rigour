@@ -538,18 +538,24 @@ def scout(topic: str, track: str | None = None) -> list[str]:
     return added
 
 
-def canary(n: int = 1, roles=("novelty1", "novelty2")) -> None:
-    """Plant known ideas (dropped, with prior art) and check whether each novelty agent says 'exists'."""
-    dropped = [p for p in (RECORDS / "ideas").glob("*.md") if re.search(r"^status: dropped$", p.read_text(encoding="utf-8"), re.M)]
-    if not dropped:
-        return print("No dropped ideas to use as canaries yet.")
+def dropped_ideas() -> list[Path]:
+    return [p for p in (RECORDS / "ideas").glob("*.md")
+            if re.search(r"^status: dropped$", p.read_text(encoding="utf-8"), re.M)]
+
+
+def canary(n: int = 1, roles=("novelty1", "novelty2"), candidates: list[Path] | None = None) -> list[Path]:
+    dropped = dropped_ideas() if candidates is None else candidates
+    selected = random.sample(dropped, min(n, len(dropped)))
+    if not selected:
+        print("No eligible dropped ideas for calibration.")
+        return []
     log = RECORDS / "calibration.csv"
     new = not log.exists()
     with open(log, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new:
             w.writerow(["date", "canary", "agent", "verdict", "caught", "confidence"])
-        for p in random.sample(dropped, min(n, len(dropped))):
+        for p in selected:
             text = p.read_text(encoding="utf-8")
             title = re.search(r"^title: (.*)$", text, re.M).group(1)
             problem = text.split("## Problem", 1)[1].split("##", 1)[0].strip() if "## Problem" in text else ""
@@ -558,7 +564,8 @@ def canary(n: int = 1, roles=("novelty1", "novelty2")) -> None:
                 agent = f"{role_cfg(role)['agent']}/{role_cfg(role)['model']}"
                 w.writerow([now("%Y-%m-%d"), p.stem, agent, res["verdict"], res["verdict"] == "exists", res.get("confidence")])
                 print(f"  {p.stem} / {agent}: {res['verdict']}")
-    commit(f"canary x{n}")
+    commit(f"canary x{len(selected)}")
+    return selected
 
 
 def calibration() -> None:
@@ -588,6 +595,7 @@ def session(topic: str = "", cycles: int | None = None, minutes: float | None = 
     deadline = time.time() + 60 * minutes if minutes else float("inf")
     go = lambda: time.time() < deadline and not over_budget(stamp)  # noqa: E731  checked before anything new starts
     rebuild()  # orient: fresh digest and search index before any agent runs
+    canary_pool = dropped_ideas()
     c = 0
     try:
         while go() and (cycles is None or c < cycles):
@@ -596,7 +604,8 @@ def session(topic: str = "", cycles: int | None = None, minutes: float | None = 
                   + f", ${spent(stamp):.2f} Claude USD-equivalent so far", flush=True)
             print_usage()
             if c % 3 == 0:
-                canary(1)
+                for case in canary(candidates=canary_pool):
+                    canary_pool.remove(case)
             queue = untested(track)
             if len(queue) < 2 and go():
                 scout(topic, track)
