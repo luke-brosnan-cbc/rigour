@@ -3,11 +3,12 @@
     py loop.py init                     # create the records folder (ideas/, runs/, CONTEXT.md, TEMPLATE.md)
     py loop.py scout "<topic>"          # new ideas into the records (status idea, or dropped with the prior art)
     py loop.py run <idea-id>            # novelty x2 (+ tie-break) -> referee tests -> build -> judge -> record
+    py loop.py resume <idea-id>          # repair the most recent partial run and judge it again
     py loop.py canary [n]               # plant n known (dropped) ideas, check the novelty agents catch them
     py loop.py calibration              # canary catch rate per agent
     py loop.py usage [now]              # 5-hour and weekly subscription usage per agent (now = live reading)
-    py loop.py auto [cycles] [topic]    # a fixed number of cycles, then synthesis
-    py loop.py night [minutes] [topic]  # until the time is up (the current idea always finishes), then synthesis
+    py loop.py auto [cycles] [topic]    # a fixed number of cycles, then a session report
+    py loop.py night [minutes] [topic]  # start work until the time is up, then write a session report
     py loop.py synthesise               # journal, links and combined ideas from tonight's runs
     py loop.py schedule HH:MM [minutes] # run `night` every day at HH:MM (Windows Task Scheduler, or prints a cron line)
     py loop.py unschedule
@@ -28,6 +29,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 import records
 
@@ -84,32 +86,53 @@ def over_budget(session_start: str) -> str:
 
 def parse_claude(stdout: str) -> dict:
     """Read Claude's stream-json events: the final result and the latest subscription usage."""
-    res, info = {}, {}
+    res, status, windows = {}, "allowed", {}
     for line in stdout.splitlines():
         try:
-            e = json.loads(line)
+            event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if e.get("type") == "result":
-            res = e
-        elif e.get("type") == "rate_limit_event":
-            info = e.get("rate_limit_info", {})
-    win = info.get("unifiedWindows", {})
-    pct = lambda w: round(100 * win[w]["utilization"], 1) if win.get(w, {}).get("utilization") is not None else ""  # noqa: E731
-    return {"result": res, "five": pct("five_hour"), "seven": pct("seven_day"), "status": info.get("status", "allowed"),
-            "resets": {w: win[w].get("resetsAt") for w in win}}
+        if event.get("type") == "result":
+            res = event
+        elif event.get("type") == "rate_limit_event":
+            info = event.get("rate_limit_info") or {}
+            status = info.get("status", status)
+            windows.update({k: v for k, v in (info.get("unifiedWindows") or {}).items()
+                            if v and v.get("utilization") is not None})
+            if info.get("rateLimitType") and info.get("utilization") is not None:
+                windows[info["rateLimitType"]] = info
+    pct = lambda name: round(100 * windows[name]["utilization"], 1) if name in windows else ""
+    return {"result": res, "five": pct("five_hour"), "seven": pct("seven_day"), "status": status,
+            "resets": {name: window.get("resetsAt") for name, window in windows.items()}}
 
 
-def codex_usage(codex_home: str, since: float) -> dict:
-    """Codex keeps its limits in its saved session files: primary = 5-hour window, secondary = weekly window."""
-    files = [p for p in Path(codex_home).glob("sessions/**/*.jsonl") if p.stat().st_mtime >= since - 5]
-    for p in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True):
-        text = p.read_text(encoding="utf-8", errors="replace")
-        got = {k: re.findall(rf'"{k}":(\{{[^{{}}]*\}})', text) for k in ("primary", "secondary")}
-        if got["primary"] or got["secondary"]:
-            last = {k: json.loads(v[-1]) if v else {} for k, v in got.items()}
-            return {"five": last["primary"].get("used_percent", ""), "seven": last["secondary"].get("used_percent", ""),
-                    "resets": {"five_hour": last["primary"].get("resets_at"), "seven_day": last["secondary"].get("resets_at")}}
+def codex_usage(codex_home: str, since: float, output: str = "") -> dict:
+    session = re.search(r"(?im)^session id:\s*([0-9a-f-]{36})\s*$", output)
+    files = Path(codex_home).glob(f"sessions/**/*{session[1]}.jsonl" if session else "sessions/**/*.jsonl")
+    recent = [(mtime, path) for path in files if (mtime := path.stat().st_mtime) >= since - 5]
+    for _, path in sorted(recent, reverse=True):
+        windows = {}
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") != "event_msg":
+                    continue
+                payload = event.get("payload") or {}
+                limits = payload.get("rate_limits") or {}
+                if payload.get("type") != "token_count" or limits.get("limit_id") not in (None, "codex"):
+                    continue
+                for key, default_minutes in (("primary", 300), ("secondary", 10080)):
+                    window = limits.get(key) or {}
+                    if window.get("used_percent") is not None:
+                        windows[window.get("window_minutes") or default_minutes] = window
+        if 300 in windows or 10080 in windows:
+            return {"five": windows.get(300, {}).get("used_percent", ""),
+                    "seven": windows.get(10080, {}).get("used_percent", ""),
+                    "resets": {"five_hour": windows.get(300, {}).get("resets_at"),
+                               "seven_day": windows.get(10080, {}).get("resets_at")}}
     return {"five": "", "seven": "", "resets": {}}
 
 
@@ -118,6 +141,24 @@ def role_cfg(role: str) -> dict:
     if CFG["agents"][r["agent"]]["kind"] == "codex" and not shutil.which("codex"):
         r["agent"] = CFG["fallback"]["codex"]
     return r
+
+
+def usage_accounts() -> dict:
+    active = {role_cfg(role)["agent"] for role in CFG["roles"]}
+    return {name: agent for name, agent in CFG["agents"].items() if name in active}
+
+
+def usage_text(five, seven) -> str:
+    pct = lambda value: f"{float(value):g}%" if value not in ("", None) else "unavailable"
+    return f"5-hour {pct(five)} | weekly {pct(seven)}"
+
+
+def print_usage() -> None:
+    rows = latest_usage()
+    for name in usage_accounts():
+        five, seven, date = rows.get(name, ("", "", ""))
+        stamp = f" (last reported {date})" if date else ""
+        print(f"  {name} | {usage_text(five, seven)}{stamp}", flush=True)
 
 
 def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -> None:
@@ -159,8 +200,11 @@ def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -
     if a["kind"] == "claude":
         u = parse_claude(p.stdout)
     else:
-        u = codex_usage(env.get("CODEX_HOME") or os.path.expanduser("~/.codex"), t0)
+        u = codex_usage(env.get("CODEX_HOME") or os.path.expanduser("~/.codex"), t0, p.stderr + "\n" + p.stdout)
     log_metrics(cwd, role, r, u, time.time() - t0, p.stdout + p.stderr)
+    cost = (u.get("result") or {}).get("total_cost_usd")
+    price = f"USD-equivalent ${cost:.3f}" if cost is not None else "USD-equivalent unavailable"
+    print(f"  [{role} complete] {r['agent']} | {usage_text(u['five'], u['seven'])} | {price}", flush=True)
     if u.get("status", "allowed") != "allowed":
         raise Stop(f"{r['agent']} reports its usage limit as '{u['status']}' during {role}")
     # shortcut: matches the limit message text, which the CLIs may change; check _<role>.log if a stop looks wrong
@@ -202,9 +246,7 @@ def log_metrics(cwd: Path, role: str, r: dict, u: dict, seconds: float, raw: str
 def usage(probe: bool = False) -> None:
     """Show each agent's 5-hour and weekly usage. With `now`, make one tiny call per agent for fresh numbers."""
     if probe:
-        for name, a in CFG["agents"].items():
-            if name not in {role_cfg(r)["agent"] for r in CFG["roles"]}:
-                continue
+        for name, a in usage_accounts().items():
             env = {**os.environ, **{k: os.path.expanduser(v) for k, v in a.get("env", {}).items()}}
             t0 = time.time()
             if a["kind"] == "claude":
@@ -214,18 +256,15 @@ def usage(probe: bool = False) -> None:
                 u = parse_claude(p.stdout)
             else:
                 cmd = [shutil.which("codex") or "codex", "exec", "--skip-git-repo-check", "--ignore-rules", "-s", "read-only", "-"]
-                subprocess.run(cmd, input="Reply with the single word ok.", env=env, capture_output=True, text=True,
-                               encoding="utf-8", errors="replace", timeout=300, cwd=HERE)
-                u = codex_usage(env.get("CODEX_HOME") or os.path.expanduser("~/.codex"), t0)
-            when = lambda ts: datetime.fromtimestamp(ts).strftime("%a %H:%M") if ts else "?"  # noqa: E731
-            print(f"{name}: 5-hour {u['five'] or '?'}% (resets {when(u['resets'].get('five_hour'))}), "
-                  f"weekly {u['seven'] or '?'}% (resets {when(u['resets'].get('seven_day'))})")
+                p = subprocess.run(cmd, input="Reply with the single word ok.", env=env, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=300, cwd=HERE)
+                u = codex_usage(env.get("CODEX_HOME") or os.path.expanduser("~/.codex"), t0, p.stderr + "\n" + p.stdout)
+            resets = u["resets"]
+            windows = ", ".join(f"{label} resets {datetime.fromtimestamp(resets[key]).strftime('%a %H:%M')}"
+                                for key, label in (("five_hour", "5-hour"), ("seven_day", "weekly")) if resets.get(key))
+            print(f"{name} | {usage_text(u['five'], u['seven'])}" + (f" ({windows})" if windows else ""), flush=True)
         return
-    rows = latest_usage()
-    if not rows:
-        return print("No usage logged yet. Run `py loop.py usage now` for a live reading.")
-    for agent, (five, seven, date) in rows.items():
-        print(f"{agent}: 5-hour {five or '?'}%, weekly {seven or '?'}% (as of {date})")
+    print_usage()
 
 
 def read_json(path: Path) -> dict:
@@ -250,7 +289,7 @@ def commit(message: str) -> None:
     """Commit and push the records repo, if it is one. Plain git, so no tool attribution."""
     if not (RECORDS / ".git").exists() or not CFG.get("auto_commit", True):
         return
-    subprocess.run(["git", "add", "-A"], cwd=RECORDS, check=True)
+    subprocess.run(["git", "-c", "core.safecrlf=false", "add", "-A"], cwd=RECORDS, check=True)
     if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=RECORDS).returncode:
         subprocess.run(["git", "commit", "-q", "-m", message], cwd=RECORDS, check=True)
         subprocess.run(["git", "push", "-q"], cwd=RECORDS, check=False)
@@ -275,13 +314,13 @@ def related(ws: Path, query: str, copy_mvps: int = 0) -> None:
             shutil.copytree(RUNS / run / "mvp", ws / "related" / run, ignore=shutil.ignore_patterns("_*", "__pycache__"))
 
 
-def novelty(run: Path, idea_text: str, roles=("novelty1", "novelty2")) -> dict:
+def novelty(run: Path, idea_text: str, roles=("novelty1", "novelty2"), task: str = "") -> dict:
     out = {}
     for role in roles:
         ws = run / f"novelty-{role}"
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "idea.md").write_text(idea_text, encoding="utf-8")
-        call(role, ws)
+        call(role, ws, task=task)
         out[role] = read_json(ws / "novelty.json")
     return out
 
@@ -305,14 +344,22 @@ def run_idea(idea_id: str) -> Path:
     print(f"1/5 novelty: two independent checks on {idea_id}")
     nov = novelty(run, idea)
     verdicts = {v["verdict"] for v in nov.values()}
-    if len(verdicts) > 1:  # cascade: escalate to the strong model only when the cheap checks disagree
+    decisive = list(nov.values())
+    if len(verdicts) > 1:
         print("    the checks disagree: tie-break")
-        nov.update(novelty(run, idea, ("tiebreak",)))
-        exists = nov["tiebreak"]["verdict"] == "exists"
-    else:
-        exists = verdicts == {"exists"}
-    if exists:
+        task = ("Assess both earlier checks below. Open the decisive sources yourself. "
+                "Explain which core feature they already deliver and what gap remains.\n"
+                + json.dumps(nov, indent=2))
+        nov.update(novelty(run, idea, ("tiebreak",), task=task))
+        decisive = [nov["tiebreak"]]
+    verdict = decisive[0]["verdict"]
+    matches = [hit for check in decisive for hit in check.get("closest", [])
+               if hit.get("matches") and hit.get("url")]
+    if verdict == "exists" and matches:
         return record(idea_id, run, {"verdict": "exists", "novelty": nov})
+    if verdict != "novel":
+        return record(idea_id, run, {"verdict": "review", "novelty": nov,
+                                   "lessons": "Review the cited prior art before building or dropping this idea."})
 
     print("2/5 referee writes criteria and sealed tests")
     spec = HERE / ".sealed" / run.name  # outside the records tree; the builder's file tools cannot reach it
@@ -334,6 +381,61 @@ def run_idea(idea_id: str) -> Path:
     related(mvp, idea, copy_mvps=2)
     call("builder", mvp, tools=["Read", "Write", "Edit", "Glob", "Grep", *WEB, *PY])
 
+    return judge_mvp(idea_id, run, spec, mvp, sealed, nov)
+
+
+def resume(idea_id: str) -> Path:
+    if Path(idea_id).name != idea_id:
+        raise SystemExit("Use an idea ID from the records.")
+    path = RECORDS / "ideas" / f"{idea_id}.md"
+    if not path.is_file():
+        raise SystemExit(f"Unknown idea: {idea_id}")
+    idea = path.read_text(encoding="utf-8")
+    history = re.findall(r"^- \d{4}-\d{2}-\d{2}: run `([^/\\`]+)`:", idea, re.M)
+    if not history:
+        raise SystemExit(f"No completed run for {idea_id}")
+    previous = RUNS / history[-1]
+    result = read_json(previous / "result.json")
+    if result["verdict"] != "partial":
+        raise SystemExit(f"The last verdict for {idea_id} was {result['verdict']}. Resume requires partial.")
+    check_independence()
+    run = RUNS / f"{now()}-repair-{uuid4().hex[:8]}-{idea_id}"
+    run.mkdir()
+    spec = HERE / ".sealed" / run.name
+    shutil.copytree(previous / "referee", spec)
+    regression = spec.with_name(f"{run.name}-regressions")
+    regression.mkdir()
+    shutil.copy2(spec / "criteria.md", regression / "criteria.md")
+    shutil.copy2(spec / "idea.md", regression / "idea.md")
+    (regression / "RELATED.md").write_text("\n".join(result.get("evidence", []) + [result.get("lessons", "")]),
+                                           encoding="utf-8")
+    call("referee_spec", regression, task=(
+        "This is a repair test plan. Keep the existing acceptance criteria. Use RELATED.md for the prior verdict. "
+        "Write only tests/test_repair.py covering concrete failures from that verdict. "
+        "Import the MVP from the sibling mvp directory of the judge workspace. "
+        "Cover defects with known answers. Leave broader product work for later."
+    ), tools=["Read", "Write", "Edit", "Glob", "Grep", *PY])
+    tests = regression / "tests" / "test_repair.py"
+    if not tests.is_file() or not tests.stat().st_size:
+        raise SystemExit("The referee did not produce repair tests.")
+    index = 1
+    while (spec / "tests" / f"test_repair_{index}.py").exists():
+        index += 1
+    shutil.copy2(tests, spec / "tests" / f"test_repair_{index}.py")
+    sealed = seal(spec)
+
+    mvp = run / "mvp"
+    shutil.copytree(previous / "mvp", mvp, ignore=shutil.ignore_patterns("related", "__pycache__", ".pytest_cache", ".venv"))
+    (mvp / "REPAIR.md").write_text(result.get("lessons", ""), encoding="utf-8")
+    call("builder", mvp, task=(
+        "Repair the existing MVP in place. Read REPAIR.md for the referee's feedback. "
+        "Fix the defects within the original acceptance criteria and update REPORT.md."
+    ), tools=["Read", "Write", "Edit", "Glob", "Grep", *PY])
+    return judge_mvp(idea_id, run, spec, mvp, sealed, result.get("novelty", {}), previous.name)
+
+
+def judge_mvp(idea_id: str, run: Path, spec: Path, mvp: Path, sealed: str,
+              novelty_checks: dict, previous: str | None = None) -> Path:
     print("4/5 referee checks the seal, runs its tests and judges")
     if seal(spec) != sealed:
         raise SystemExit("The referee's sealed tests changed during the build. Run stopped.")
@@ -343,19 +445,21 @@ def run_idea(idea_id: str) -> Path:
     shutil.copytree(mvp, judge / "mvp", ignore=shutil.ignore_patterns("related"))
     call("referee_judge", judge, tools=["Read", "Write", "Glob", "Grep", *PY])
     v = read_json(judge / "verdict.json")
-    v.update(novelty=nov, builder=role_cfg("builder")["agent"], referee=role_cfg("referee_judge")["agent"], seal=sealed)
+    v.update(novelty=novelty_checks, builder=role_cfg("builder")["agent"], referee=role_cfg("referee_judge")["agent"], seal=sealed)
+    if previous:
+        v["previous_run"] = previous
     print("5/5 record")
     return record(idea_id, run, v)
 
 
 def record(idea_id: str, run: Path, v: dict) -> Path:
-    (run / "result.json").write_text(json.dumps(v, indent=1), encoding="utf-8")
+    (run / "result.json").write_text(json.dumps(dict(v, idea_id=idea_id), indent=1), encoding="utf-8")
     nov = ", ".join(f"{a}: {n['verdict']}" for a, n in v.get("novelty", {}).items())
     tests = f", tests {v['tests_passed']}/{v['tests_total']}, reproduced {v['reproduced']}" if "tests_total" in v else ""
     line = f"- {now('%Y-%m-%d')}: run `{run.name}`: {v['verdict']}{tests}. Novelty ({nov}). {v.get('lessons', '')}".rstrip() + "\n"
     path = RECORDS / "ideas" / f"{idea_id}.md"
     text = re.sub(r"^updated: .*$", f"updated: {now('%Y-%m-%d')}", path.read_text(encoding="utf-8"), count=1, flags=re.M)
-    status = {"works": "prototype", "exists": "dropped", "error": "parked"}.get(v["verdict"])
+    status = {"works": "prototype", "exists": "dropped", "review": "parked", "error": "parked"}.get(v["verdict"])
     if status:
         text = re.sub(r"^status: .*$", f"status: {status}", text, count=1, flags=re.M)
     path.write_text(text.rstrip("\n") + "\n" + line, encoding="utf-8")
@@ -489,7 +593,8 @@ def session(topic: str = "", cycles: int | None = None, minutes: float | None = 
         while go() and (cycles is None or c < cycles):
             c += 1
             print(f"=== cycle {c}" + (f", {round((deadline - time.time()) / 60)} min left" if minutes else "")
-                  + f", {spent(stamp):.2f} USD so far")
+                  + f", ${spent(stamp):.2f} Claude USD-equivalent so far", flush=True)
+            print_usage()
             if c % 3 == 0:
                 canary(1)
             queue = untested(track)
@@ -507,35 +612,71 @@ def session(topic: str = "", cycles: int | None = None, minutes: float | None = 
                 record(queue[0], failed, {"verdict": "error", "lessons": f"Run error: {e}"})
     except Stop as e:
         print(f"Stopping early: {e}. The idea in progress stays untested and goes first next time.")
+        write_session_report(start)
         commit(f"session stopped: {e}")
         return  # no synthesis call when the account is out of usage
     print(f"Session ends: {over_budget(stamp) or 'time or cycles used up'}")
-    synthesise(start)
+    write_session_report(start)
+    if CFG.get("auto_synthesis", False):
+        synthesise(start)
+    else:
+        commit("session report")
+
+
+def write_session_report(since: datetime) -> None:
+    report = RECORDS / "journal" / f"{now('%Y-%m-%d-%H%M%S')}-session.md"
+    report.parent.mkdir(exist_ok=True)
+    summary = tonight_summary(since)
+    report.write_text("# Session report\n\n" + summary, encoding="utf-8")
+    print(summary, end="", flush=True)
+    print(f"Session report: {report}", flush=True)
 
 
 def tonight_summary(since: datetime) -> str:
-    """Built by script: one block per run since `since`, plus cost per run compared with earlier sessions."""
     out = []
     for f in sorted(RUNS.glob("*/result.json")):
-        if datetime.fromtimestamp(f.stat().st_mtime) >= since:
-            v = json.loads(f.read_text(encoding="utf-8"))
-            nov = ", ".join(f"{a}: {n['verdict']}" for a, n in v.get("novelty", {}).items())
-            out.append(f"- {f.parent.name}: {v['verdict']}, tests {v.get('tests_passed', '-')}/{v.get('tests_total', '-')}, "
-                       f"reproduced {v.get('reproduced', '-')}, useful {v.get('useful', '-')}. Novelty: {nov}. {v.get('lessons', '')}")
-    if (RECORDS / "calibration.csv").exists():
-        for row in csv.DictReader(open(RECORDS / "calibration.csv", encoding="utf-8")):
-            if row["date"] >= since.strftime("%Y-%m-%d"):
-                out.append(f"- canary {row['canary']} / {row['agent']}: {row['verdict']} (caught: {row['caught']})")
+        if datetime.fromtimestamp(f.stat().st_mtime) < since:
+            continue
+        v = json.loads(f.read_text(encoding="utf-8"))
+        nov = ", ".join(f"{role}={check['verdict']}" for role, check in v.get("novelty", {}).items())
+        out.append(f"- {f.parent.name}: **{v['verdict']}** ([result](../runs/{f.parent.name}/result.json))")
+        if "tests_total" in v:
+            out.append(f"  - Tests {v['tests_passed']}/{v['tests_total']}. Reproduced: {v.get('reproduced')}.")
+        if nov:
+            out.append(f"  - Novelty: {nov}.")
+        for evidence in v.get("evidence", []):
+            out.append(f"  - {evidence}")
+        checks = v.get("novelty", {})
+        if "tiebreak" in checks:
+            checks = {"tiebreak": checks["tiebreak"]}
+        for check in checks.values():
+            for hit in check.get("closest", []):
+                if hit.get("matches") and hit.get("url") and check["verdict"] == "exists":
+                    item = f"  - Prior art: {hit['name']} ({hit['url']}) matches {hit['matches']}"
+                    if item not in out:
+                        out.append(item)
+        if v.get("lessons"):
+            out.append(f"  - {v['lessons']}")
+        if v["verdict"] == "partial":
+            idea_id = v.get("idea_id") or f.parent.name.split("-", 2)[2]
+            out.append(f"  - Continue with `py loop.py resume {idea_id}`.")
     if not out:
-        out.append("- No runs or canaries this session.")
-    cost = {"tonight": [], "before": []}
+        out.append("- No completed idea runs.")
+    if (RECORDS / "calibration.csv").exists():
+        with (RECORDS / "calibration.csv").open(encoding="utf-8") as stream:
+            checks = [f"- {row['canary']} / {row['agent']}: {row['verdict']} (caught: {row['caught']})"
+                      for row in csv.DictReader(stream) if row["date"] == since.strftime("%Y-%m-%d")]
+        if checks:
+            out.extend(["", "Canary checks logged today", "", *checks])
+    rows = []
     if (RECORDS / "metrics.csv").exists():
-        for row in csv.DictReader(open(RECORDS / "metrics.csv", encoding="utf-8")):
-            key = "tonight" if row["date"] >= since.strftime("%Y-%m-%d %H:%M") else "before"
-            cost[key].append(float(row["cost_usd"] or 0))
-    mean = lambda xs: f"{sum(xs) / len(xs):.3f}" if xs else "-"  # noqa: E731
-    out.append(f"\nAgent calls tonight: {len(cost['tonight'])}, total {sum(cost['tonight']):.2f} USD-equivalent, "
-               f"mean per call {mean(cost['tonight'])} (earlier sessions: {mean(cost['before'])}).")
+        with (RECORDS / "metrics.csv").open(encoding="utf-8") as stream:
+            rows = [row for row in csv.DictReader(stream) if row["date"] >= since.strftime("%Y-%m-%d %H:%M")]
+    priced = [float(row["cost_usd"]) for row in rows if row["cost_usd"]]
+    out.extend(["", f"Agent calls: {len(rows)}. Claude USD-equivalent: ${sum(priced):.2f} "
+                    f"({len(priced)} priced, {len(rows) - len(priced)} unpriced)."])
+    for name, (five, seven, date) in latest_usage().items():
+        out.append(f"- {name} | {usage_text(five, seven)} (last reported {date})")
     return "\n".join(out) + "\n"
 
 
@@ -614,6 +755,7 @@ if __name__ == "__main__":
     num = lambda i, d: float(args[i]) if len(args) > i else d  # noqa: E731
     t, rest = split_track(" ".join(args if cmd == "scout" else args[1:]))
     {"init": init, "scout": lambda: scout(rest, t), "run": lambda: run_idea(args[0]),
+     "resume": lambda: resume(args[0]),
      "canary": lambda: canary(int(num(0, 1))), "calibration": calibration, "usage": lambda: usage(args[:1] == ["now"]),
      "auto": lambda: session(" ".join(args[1:]), cycles=int(num(0, 3))),
      "night": lambda: session(" ".join(args[1:]), minutes=num(0, 60)),
