@@ -70,12 +70,22 @@ The design follows what current evidence says about agent cost:
 Set caps in `config.json`:
 
 ```json
-"budget": { "session_usd": 5, "day_usd": 10 }
+"budget": { "session_usd": 5, "day_usd": 10, "five_hour_pct": 80, "seven_day_pct": 60 }
 ```
 
-The loop checks the caps before it starts anything new, the same way it checks the time limit. The cost is the USD-equivalent that Claude Code reports. On a subscription it measures usage and is not a bill. If an account hits its usage limit, the session stops at once. The idea in progress stays untested and goes first next time.
+The loop checks the caps before it starts anything new, the same way it checks the time limit.
 
-[ccusage](https://github.com/ryoppippi/ccusage) reads Claude Code's saved session logs. rigour runs with `--no-session-persistence`, so ccusage does not see its calls. Use `metrics.csv` instead. It has the same numbers per call, plus the role and the run.
+- `five_hour_pct` and `seven_day_pct` use your real subscription usage. Claude Code reports it in a `rate_limit_event` on every call, and Codex writes it to its saved session files. `metrics.csv` logs both percentages on every call. These are the best caps on a Pro or Max plan.
+- `session_usd` and `day_usd` use the USD-equivalent that Claude Code reports at list prices. On a subscription it measures usage and is not a bill. Codex reports no cost, so these caps count Claude calls only.
+
+If an account reports that its limit is reached, the session stops at once. The idea in progress stays untested and goes first next time.
+
+```
+py loop.py usage        # last logged 5-hour and weekly usage per agent
+py loop.py usage now    # live reading: one tiny call per agent
+```
+
+[ccusage](https://github.com/ryoppippi/ccusage) reads Claude Code's saved session logs. rigour runs with `--no-session-persistence`, so ccusage does not see its calls. Use `py loop.py usage` and `metrics.csv` instead.
 
 ### How the context is built
 

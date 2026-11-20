@@ -5,6 +5,7 @@
     py loop.py run <idea-id>            # novelty x2 (+ tie-break) -> referee tests -> build -> judge -> record
     py loop.py canary [n]               # plant n known (dropped) ideas, check the novelty agents catch them
     py loop.py calibration              # canary catch rate per agent
+    py loop.py usage [now]              # 5-hour and weekly subscription usage per agent (now = live reading)
     py loop.py auto [cycles] [topic]    # a fixed number of cycles, then synthesis
     py loop.py night [minutes] [topic]  # until the time is up (the current idea always finishes), then synthesis
     py loop.py synthesise               # journal, links and combined ideas from tonight's runs
@@ -42,7 +43,7 @@ PY = [f"{SHELL}(python *)", f"{SHELL}(py *)", f"{SHELL}(pytest *)"]
 ROLE_FILES = {"novelty1": "novelty.md", "novelty2": "novelty.md", "tiebreak": "novelty.md", "scout": "scout.md",
               "referee_spec": "referee-spec.md", "builder": "builder.md", "referee_judge": "referee-judge.md", "synth": "synth.md"}
 METRICS = ["date", "run", "role", "agent", "model", "cost_usd", "input", "output", "cache_read", "cache_write",
-           "web_searches", "seconds", "error", "tokens_total"]
+           "web_searches", "seconds", "error", "tokens_total", "five_hour_pct", "seven_day_pct"]
 now = lambda fmt="%Y%m%d-%H%M": datetime.now().strftime(fmt)  # noqa: E731
 
 
@@ -57,13 +58,59 @@ def spent(since: str) -> float:
     return sum(float(r["cost_usd"] or 0) for r in csv.DictReader(open(RECORDS / "metrics.csv", encoding="utf-8")) if r["date"] >= since)
 
 
+def latest_usage() -> dict:
+    """Latest subscription usage per agent from metrics.csv: {agent: (five_hour_pct, seven_day_pct, date)}."""
+    out = {}
+    if (RECORDS / "metrics.csv").exists():
+        for r in csv.DictReader(open(RECORDS / "metrics.csv", encoding="utf-8")):
+            if r.get("five_hour_pct") or r.get("seven_day_pct"):
+                out[r["agent"]] = (r.get("five_hour_pct"), r.get("seven_day_pct"), r["date"])
+    return out
+
+
 def over_budget(session_start: str) -> str:
     b = CFG.get("budget", {})
     if b.get("session_usd") and spent(session_start) >= b["session_usd"]:
         return f"session budget of {b['session_usd']} USD reached"
     if b.get("day_usd") and spent(now("%Y-%m-%d")) >= b["day_usd"]:
         return f"daily budget of {b['day_usd']} USD reached"
+    for agent, (five, seven, _) in latest_usage().items():
+        if b.get("five_hour_pct") and five and float(five) >= b["five_hour_pct"]:
+            return f"{agent} is at {five}% of its 5-hour limit (cap {b['five_hour_pct']}%)"
+        if b.get("seven_day_pct") and seven and float(seven) >= b["seven_day_pct"]:
+            return f"{agent} is at {seven}% of its weekly limit (cap {b['seven_day_pct']}%)"
     return ""
+
+
+def parse_claude(stdout: str) -> dict:
+    """Read Claude's stream-json events: the final result and the latest subscription usage."""
+    res, info = {}, {}
+    for line in stdout.splitlines():
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if e.get("type") == "result":
+            res = e
+        elif e.get("type") == "rate_limit_event":
+            info = e.get("rate_limit_info", {})
+    win = info.get("unifiedWindows", {})
+    pct = lambda w: round(100 * win[w]["utilization"], 1) if win.get(w, {}).get("utilization") is not None else ""  # noqa: E731
+    return {"result": res, "five": pct("five_hour"), "seven": pct("seven_day"), "status": info.get("status", "allowed"),
+            "resets": {w: win[w].get("resetsAt") for w in win}}
+
+
+def codex_usage(codex_home: str, since: float) -> dict:
+    """Codex keeps its limits in its saved session files: primary = 5-hour window, secondary = weekly window."""
+    files = [p for p in Path(codex_home).glob("sessions/**/*.jsonl") if p.stat().st_mtime >= since - 5]
+    for p in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True):
+        text = p.read_text(encoding="utf-8", errors="replace")
+        got = {k: re.findall(rf'"{k}":(\{{[^{{}}]*\}})', text) for k in ("primary", "secondary")}
+        if got["primary"] or got["secondary"]:
+            last = {k: json.loads(v[-1]) if v else {} for k, v in got.items()}
+            return {"five": last["primary"].get("used_percent", ""), "seven": last["secondary"].get("used_percent", ""),
+                    "resets": {"five_hour": last["primary"].get("resets_at"), "seven_day": last["secondary"].get("resets_at")}}
+    return {"five": "", "seven": "", "resets": {}}
 
 
 def role_cfg(role: str) -> dict:
@@ -86,15 +133,16 @@ def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -
         # --safe-mode: no CLAUDE.md, memory, hooks or plugins. --restricted: file tools stay inside cwd.
         cmd = ["claude", "-p", "Do the task in your instructions. Work in the current folder.",
                "--append-system-prompt", prompt, "--no-session-persistence", "--safe-mode", "--restricted",
-               "--permission-mode", "acceptEdits", "--output-format", "json",
+               "--permission-mode", "acceptEdits", "--output-format", "stream-json", "--verbose",
                "--model", r["model"], "--effort", r.get("effort", "medium"),
                "--tools", ",".join(sorted({t.split("(")[0] for t in tools})), "--allowed-tools", *tools]
         if r.get("fallback_model"):
             cmd += ["--fallback-model", r["fallback_model"]]
     else:
-        # Codex: give it its own CODEX_HOME in config.json so your AGENTS.md is not loaded. --ephemeral: no saved session.
+        # Codex: give it its own CODEX_HOME in config.json so your AGENTS.md is not loaded. Sessions are saved there
+        # (no --ephemeral) because that is where Codex records its usage limits.
         # workspace-write limits writes to cwd; reads are not confined. The prompt goes in on stdin ("-").
-        cmd = [shutil.which("codex") or "codex", "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-rules",
+        cmd = [shutil.which("codex") or "codex", "exec", "--skip-git-repo-check", "--ignore-rules",
                "-s", "workspace-write", "-C", str(cwd),
                "-c", 'web_search="live"' if any(t in WEB for t in tools) else 'web_search="disabled"',
                "-c", f'model_reasoning_effort="{r.get("effort", "medium")}"']
@@ -108,37 +156,76 @@ def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -
     p = subprocess.run(cmd, cwd=cwd, env=env, timeout=60 * CFG.get("max_call_minutes", 60), capture_output=True,
                        text=True, encoding="utf-8", errors="replace", input=None if a["kind"] == "claude" else prompt)
     (cwd / f"_{role}.log").write_text(p.stdout + "\n--- stderr ---\n" + p.stderr, encoding="utf-8")
-    log_metrics(cwd, role, r, p.stdout, time.time() - t0, p.stderr)
-    # shortcut: matches the limit message text, which Claude Code may change; check _<role>.log if a stop looks wrong
-    failed = p.returncode != 0 or re.search(r'"is_error"\s*:\s*true', p.stdout)
+    if a["kind"] == "claude":
+        u = parse_claude(p.stdout)
+    else:
+        u = codex_usage(env.get("CODEX_HOME") or os.path.expanduser("~/.codex"), t0)
+    log_metrics(cwd, role, r, u, time.time() - t0, p.stdout + p.stderr)
+    if u.get("status", "allowed") != "allowed":
+        raise Stop(f"{r['agent']} reports its usage limit as '{u['status']}' during {role}")
+    # shortcut: matches the limit message text, which the CLIs may change; check _<role>.log if a stop looks wrong
+    failed = p.returncode != 0 or u.get("result", {}).get("is_error")
     if failed and re.search(r"usage limit|rate limit|limit reached|out of (extra )?usage", p.stdout[-2000:] + p.stderr[-2000:], re.I):
         raise Stop(f"{r['agent']} hit a usage limit during {role}")
     if p.returncode:
         raise SystemExit(f"{role} ({r['agent']}) failed (exit {p.returncode}); see {cwd / f'_{role}.log'}")
 
 
-def log_metrics(cwd: Path, role: str, r: dict, stdout: str, seconds: float, stderr: str = "") -> None:
-    vals = [""] * 7
-    try:
-        d = json.loads(stdout)
-        u = d.get("usage", {})
-        vals = [d.get("total_cost_usd"), u.get("input_tokens"), u.get("output_tokens"), u.get("cache_read_input_tokens"),
-                u.get("cache_creation_input_tokens"), u.get("server_tool_use", {}).get("web_search_requests"), d.get("is_error")]
-        total = sum(int(u.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
-    except (json.JSONDecodeError, AttributeError):
-        m = re.search(r"tokens used\s*([\d,]+)", stderr + stdout)  # Codex prints its total; it reports no cost
+def log_metrics(cwd: Path, role: str, r: dict, u: dict, seconds: float, raw: str = "") -> None:
+    d = u.get("result") or {}
+    us = d.get("usage", {})
+    if d:
+        vals = [d.get("total_cost_usd"), us.get("input_tokens"), us.get("output_tokens"), us.get("cache_read_input_tokens"),
+                us.get("cache_creation_input_tokens"), us.get("server_tool_use", {}).get("web_search_requests"), d.get("is_error")]
+        total = sum(int(us.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+    else:
+        vals = [""] * 7
+        m = re.search(r"tokens used\s*([\d,]+)", raw)  # Codex prints its total; it reports no cost
         total = int(m.group(1).replace(",", "")) if m else ""
     run = cwd.relative_to(RUNS).parts[0] if RUNS in cwd.parents else cwd.name
     path = RECORDS / "metrics.csv"
-    if path.exists() and "tokens_total" not in path.read_text(encoding="utf-8").split("\n", 1)[0]:
-        rows = path.read_text(encoding="utf-8").splitlines()  # add the column to files from older versions
-        path.write_text("\n".join([rows[0] + ",tokens_total", *[x + "," for x in rows[1:]]]) + "\n", encoding="utf-8")
+    if path.exists() and path.read_text(encoding="utf-8").split("\n", 1)[0].strip() != ",".join(METRICS):
+        old = list(csv.DictReader(open(path, encoding="utf-8")))  # files from older versions: add the new columns
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, METRICS, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(old)
     new = not path.exists()
     with open(path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new:
             w.writerow(METRICS)
-        w.writerow([now("%Y-%m-%d %H:%M"), run, role, r["agent"], r["model"], *vals[:6], round(seconds), vals[6], total])
+        w.writerow([now("%Y-%m-%d %H:%M"), run, role, r["agent"], r["model"], *vals[:6], round(seconds), vals[6], total,
+                    u.get("five", ""), u.get("seven", "")])
+
+
+def usage(probe: bool = False) -> None:
+    """Show each agent's 5-hour and weekly usage. With `now`, make one tiny call per agent for fresh numbers."""
+    if probe:
+        for name, a in CFG["agents"].items():
+            if name not in {role_cfg(r)["agent"] for r in CFG["roles"]}:
+                continue
+            env = {**os.environ, **{k: os.path.expanduser(v) for k, v in a.get("env", {}).items()}}
+            t0 = time.time()
+            if a["kind"] == "claude":
+                p = subprocess.run(["claude", "-p", "Reply with the single word ok.", "--model", "haiku", "--effort", "low",
+                                    "--no-session-persistence", "--safe-mode", "--output-format", "stream-json", "--verbose"],
+                                   env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
+                u = parse_claude(p.stdout)
+            else:
+                cmd = [shutil.which("codex") or "codex", "exec", "--skip-git-repo-check", "--ignore-rules", "-s", "read-only", "-"]
+                subprocess.run(cmd, input="Reply with the single word ok.", env=env, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=300, cwd=HERE)
+                u = codex_usage(env.get("CODEX_HOME") or os.path.expanduser("~/.codex"), t0)
+            when = lambda ts: datetime.fromtimestamp(ts).strftime("%a %H:%M") if ts else "?"  # noqa: E731
+            print(f"{name}: 5-hour {u['five'] or '?'}% (resets {when(u['resets'].get('five_hour'))}), "
+                  f"weekly {u['seven'] or '?'}% (resets {when(u['resets'].get('seven_day'))})")
+        return
+    rows = latest_usage()
+    if not rows:
+        return print("No usage logged yet. Run `py loop.py usage now` for a live reading.")
+    for agent, (five, seven, date) in rows.items():
+        print(f"{agent}: 5-hour {five or '?'}%, weekly {seven or '?'}% (as of {date})")
 
 
 def read_json(path: Path) -> dict:
@@ -527,7 +614,7 @@ if __name__ == "__main__":
     num = lambda i, d: float(args[i]) if len(args) > i else d  # noqa: E731
     t, rest = split_track(" ".join(args if cmd == "scout" else args[1:]))
     {"init": init, "scout": lambda: scout(rest, t), "run": lambda: run_idea(args[0]),
-     "canary": lambda: canary(int(num(0, 1))), "calibration": calibration,
+     "canary": lambda: canary(int(num(0, 1))), "calibration": calibration, "usage": lambda: usage(args[:1] == ["now"]),
      "auto": lambda: session(" ".join(args[1:]), cycles=int(num(0, 3))),
      "night": lambda: session(" ".join(args[1:]), minutes=num(0, 60)),
      "synthesise": lambda: synthesise(), "schedule": lambda: schedule(args[0], args[1] if len(args) > 1 else "60"),

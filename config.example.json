@@ -57,7 +57,9 @@
   },
   "budget": {
     "session_usd": 5,
-    "day_usd": 10
+    "day_usd": 10,
+    "five_hour_pct": 80,
+    "seven_day_pct": 60
   },
   "independence": "session",
   "agents": {
