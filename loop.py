@@ -13,7 +13,8 @@
     py loop.py schedule HH:MM [minutes] # run `night` every day at HH:MM (Windows Task Scheduler, or prints a cron line)
     py loop.py unschedule
 
-Settings: config.json (copy config.example.json). Each role has an agent, a model, an effort level and skills.
+Settings: config.example.json (defaults) < config.json (needs only `records`: a folder, git URL or gh:owner/repo)
+< rigour.json in the records folder (your roles, agents, budgets and adoption_tracks).
 """
 from __future__ import annotations
 
@@ -34,10 +35,31 @@ from uuid import uuid4
 import records
 
 HERE = Path(__file__).resolve().parent
-CFG_FILE = Path(os.environ.get("RIGOUR_CONFIG") or (HERE / ("config.json" if (HERE / "config.json").exists() else "config.example.json")))
-CFG = json.loads(CFG_FILE.read_text(encoding="utf-8"))
+CFG_FILE = Path(os.environ.get("RIGOUR_CONFIG") or HERE / "config.json")
+CFG = json.loads((HERE / "config.example.json").read_text(encoding="utf-8"))  # defaults
+if CFG_FILE.exists():
+    CFG |= json.loads(CFG_FILE.read_text(encoding="utf-8-sig"))  # -sig: PowerShell 5.1 writes a BOM
+
+
+def locate(spec: str) -> Path:
+    """The records folder: a local path, or a git remote (URL or gh:owner/repo) cloned to ~/.rigour/<name> and pulled."""
+    if spec.startswith("gh:"):
+        spec = f"https://github.com/{spec[3:]}.git"
+    if not re.match(r"(https?|ssh)://|git@", spec):
+        return Path(os.path.expanduser(spec))
+    local = Path.home() / ".rigour" / spec.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    if (local / ".git").exists():
+        subprocess.run(["git", "pull", "-q", "--ff-only"], cwd=local, check=False)
+    else:
+        subprocess.run(["git", "clone", "-q", spec, str(local)], check=True)
+    return local
+
+
+RECORDS = locate(os.environ.get("RECORDS") or CFG["records"])
+if (RECORDS / "rigour.json").exists():  # your own settings travel with your records
+    CFG |= json.loads((RECORDS / "rigour.json").read_text(encoding="utf-8"))
 TASK = CFG.get("task_name", "rigour-night")
-RECORDS = Path(os.path.expanduser(os.environ.get("RECORDS") or CFG["records"]))
+ADOPT = {t.lower() for t in CFG.get("adoption_tracks", [])}  # tracks where novelty is optional
 RUNS = RECORDS / "runs"
 SHELL = "PowerShell" if os.name == "nt" else "Bash"
 WEB = ["WebSearch", "WebFetch"]
@@ -377,9 +399,9 @@ def run_idea(idea_id: str) -> Path:
     verdict = decisive[0]["verdict"]
     matches = [hit for check in decisive for hit in check.get("closest", [])
                if hit.get("matches") and hit.get("url")]
-    if track != "oe" and verdict == "exists" and matches:
+    if track not in ADOPT and verdict == "exists" and matches:
         return record(idea_id, run, {"verdict": "exists", "novelty": nov})
-    if track != "oe" and verdict != "novel":
+    if track not in ADOPT and verdict != "novel":
         return record(idea_id, run, {"verdict": "review", "novelty": nov,
                                    "lessons": "Review the cited prior art before building or dropping this idea."})
 
@@ -551,9 +573,10 @@ def scout(topic: str, track: str | None = None) -> list[str]:
     else:
         task = (topic or "Use the topics in CONTEXT.md.") + (
             f" Put the matching track name ({', '.join(tracks())}) in each idea's tags." if tracks() else "")
-    if track == "oe" or (track is None and "oe" in tracks()):
-        task += ("\nFor OE ideas, use the search steps in the vetted-idea-generation skill. "
-                 "Apply the OE adoption criteria in CONTEXT.md when deciding what survives. "
+    adopt = sorted({track} & ADOPT if track else ADOPT & set(tracks()))
+    if adopt:
+        task += (f"\nFor {', '.join(adopt)} ideas novelty is optional. Use the search steps in the vetted-idea-generation "
+                 "skill, then apply that track's adoption criteria in CONTEXT.md when deciding what survives. "
                  "An existing tool or method can support a proposal with a useful, testable adoption plan.")
     related(ws, task)
     call("scout", ws, task=task)

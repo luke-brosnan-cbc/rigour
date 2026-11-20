@@ -1,5 +1,6 @@
 {
   "records": "~/research-records",
+  "adoption_tracks": [],
   "auto_commit": true,
   "max_call_minutes": 60,
   "task_name": "rigour-night",

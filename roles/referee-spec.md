@@ -6,6 +6,6 @@ Write these files in the current folder:
 2. `tests/`: Python tests (pytest, standard library and installed packages only) that check each criterion against the builder's output. The tests import or run the MVP from the folder `../mvp`. Make at least one test check a real result (a number, a match against a known answer), not only that files exist.
 3. `holdout.md`: the inputs or cases you keep back from the builder, and what the right answer is for each. Use these in the tests.
 
-Read `RELATED.md` first. Name relevant earlier work in `criteria.md`. For an OE idea, test the proposed workflow or adaptation against a realistic baseline. Check the practical gain the idea claims. For other tracks, test the part that prior work leaves open.
+Read `RELATED.md` first. Name relevant earlier work in `criteria.md`. If the idea's track in `CONTEXT.md` makes novelty optional, test the proposed workflow or adaptation against a realistic baseline. Check the practical gain the idea claims. For other tracks, test the part that prior work leaves open.
 
 Keep the MVP small enough to build in under an hour. If the idea cannot be tested that way, write `criteria.md` with the single line `UNTESTABLE: <reason>` and stop.
