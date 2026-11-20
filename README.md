@@ -46,6 +46,8 @@ py loop.py init        # create the records folder, then edit its CONTEXT.md
 py loop.py auto 3      # three cycles, then a session report
 ```
 
+On macOS and Linux, use `python3` in place of `py`. The **[guide](docs/GUIDE.md)** covers everything else: second accounts, Codex, every setting, tracks, scheduling, budgets and canaries.
+
 ## Your records, your settings
 
 `records` can point to a local folder or a git repo. Give it `gh:you/my-research` or any git URL, and rigour clones it to `~/.rigour/` and pulls before each run. After each run it commits and pushes the results.
