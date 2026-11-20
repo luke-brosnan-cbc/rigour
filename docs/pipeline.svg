@@ -27,7 +27,7 @@
   <text class="name" x="80" y="51">Scout</text><text class="sub" x="80" y="70">new ideas</text>
 
   <rect class="box" x="168" y="24" width="120" height="64" rx="8"/>
-  <text class="name" x="228" y="51">Novelty</text><text class="sub" x="228" y="70">two checks</text>
+  <text class="name" x="228" y="51">Novelty</text><text class="sub" x="228" y="70">free search first</text>
 
   <rect class="gate" x="316" y="24" width="120" height="64" rx="8"/>
   <text class="name" x="376" y="51">Triage</text><text class="sub" x="376" y="70">worth a build?</text>

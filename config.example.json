@@ -3,10 +3,23 @@
   "adoption_tracks": [],
   "scout_survivors": 3,
   "duplicate_threshold": 0.35,
+  "prior_art": {
+    "sources": [
+      "arxiv",
+      "semantic_scholar",
+      "github"
+    ],
+    "per_source": 5
+  },
   "auto_commit": true,
   "max_call_minutes": 60,
   "task_name": "rigour-night",
   "roles": {
+    "precheck": {
+      "agent": "claude-a",
+      "model": "haiku",
+      "effort": "low"
+    },
     "scout": {
       "agent": "claude-a",
       "model": "sonnet",

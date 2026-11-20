@@ -33,6 +33,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import records
+import search
 
 HERE = Path(__file__).resolve().parent
 CFG_FILE = Path(os.environ.get("RIGOUR_CONFIG") or HERE / "config.json")
@@ -71,7 +72,7 @@ SHELL = "PowerShell" if os.name == "nt" else "Bash"
 WEB = ["WebSearch", "WebFetch"]
 PY = [f"{SHELL}(python *)", f"{SHELL}(py *)", f"{SHELL}(pytest *)"]
 R = [f"{SHELL}(Rscript *)", f"{SHELL}(Rscript.exe *)"]
-ROLE_FILES = {"novelty1": "novelty.md", "novelty2": "novelty.md", "tiebreak": "novelty.md", "scout": "scout.md", "triage": "triage.md",
+ROLE_FILES = {"novelty1": "novelty.md", "novelty2": "novelty.md", "tiebreak": "novelty.md", "scout": "scout.md", "triage": "triage.md", "precheck": "precheck.md",
               "referee_spec": "referee-spec.md", "builder": "builder.md", "referee_judge": "referee-judge.md", "synth": "synth.md"}
 METRICS = ["date", "run", "role", "agent", "model", "cost_usd", "input", "output", "cache_read", "cache_write",
            "web_searches", "seconds", "error", "tokens_total", "five_hour_pct", "seven_day_pct"]
@@ -363,12 +364,38 @@ def related(ws: Path, query: str, copy_mvps: int = 0) -> None:
             shutil.copytree(RUNS / run / "mvp", ws / "related" / run, ignore=shutil.ignore_patterns("_*", "__pycache__"))
 
 
+def precheck(run: Path, idea_text: str) -> dict | None:
+    """Free API search (no LLM), then one cheap call that judges the hits. None if turned off or nothing found."""
+    if "precheck" not in CFG["roles"]:
+        return None
+    title = re.search(r"^(?:title: |# )(.*)$", idea_text, re.M)
+    opts = CFG.get("prior_art", {})
+    hits = search.search(title.group(1) if title else idea_text[:200], opts.get("sources"), opts.get("per_source", 5))
+    print(f"   precheck: {len(hits)} hits from the search APIs")
+    if not hits:
+        return None
+    ws = run / "precheck"
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "idea.md").write_text(idea_text, encoding="utf-8")
+    (ws / "hits.json").write_text(json.dumps(hits, indent=1), encoding="utf-8")
+    call("precheck", ws, tools=["Read", "Write"])
+    return read_json(ws / "novelty.json")
+
+
+def found(check: dict | None) -> bool:
+    """A check that says 'exists' and names a matching source with a URL."""
+    return bool(check) and check.get("verdict") == "exists" and any(
+        c.get("matches") and c.get("url") for c in check.get("closest", []))
+
+
 def novelty(run: Path, idea_text: str, roles=("novelty1", "novelty2"), task: str = "") -> dict:
     out = {}
     for role in roles:
         ws = run / f"novelty-{role}"
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "idea.md").write_text(idea_text, encoding="utf-8")
+        if (run / "precheck" / "hits.json").exists():  # a head start from the free search
+            shutil.copy(run / "precheck" / "hits.json", ws)
         call(role, ws, task=task)
         out[role] = read_json(ws / "novelty.json")
     return out
@@ -395,6 +422,9 @@ def run_idea(idea_id: str) -> Path:
     if track in ADOPT:  # novelty does not gate an adoption track, and the scout already searched prior art
         print(f"1/5 novelty: skipped, {track} is an adoption track")
     else:
+        pre = precheck(run, idea)
+        if found(pre):
+            return record(idea_id, run, {"verdict": "exists", "novelty": {"precheck": pre}})
         print(f"1/5 novelty: two independent checks on {idea_id}")
         nov = novelty(run, idea)
         verdicts = {v["verdict"] for v in nov.values()}
@@ -656,7 +686,13 @@ def canary(n: int = 1, roles=("novelty1", "novelty2"), candidates: list[Path] | 
             title = re.search(r"^title: (.*)$", text, re.M).group(1)
             problem = text.split("## Problem", 1)[1].split("##", 1)[0].strip() if "## Problem" in text else ""
             blind = f"# {title}\n\n{problem}\n"  # no status, prior art or lessons: the agent must find them
-            for role, res in novelty(RUNS / f"{now()}-canary-{p.stem}", blind, roles).items():
+            run = RUNS / f"{now()}-canary-{p.stem}"
+            pre = precheck(run, blind)
+            if pre:  # the cheap tier gets a catch rate too
+                agent = f"precheck/{role_cfg('precheck')['model']}"
+                w.writerow([now("%Y-%m-%d"), p.stem, agent, pre["verdict"], found(pre), pre.get("confidence")])
+                print(f"  {p.stem} / {agent}: {pre['verdict']}")
+            for role, res in novelty(run, blind, roles).items():
                 agent = f"{role_cfg(role)['agent']}/{role_cfg(role)['model']}"
                 w.writerow([now("%Y-%m-%d"), p.stem, agent, res["verdict"], res["verdict"] == "exists", res.get("confidence")])
                 print(f"  {p.stem} / {agent}: {res['verdict']}")
