@@ -6,17 +6,7 @@ rigour runs on the Claude Code and Codex CLIs, on the subscriptions you already 
 
 It also tests its own judges. It plants ideas that already exist and measures how often each agent catches them.
 
-```mermaid
-flowchart LR
-    S[Scout] --> N[Two novelty checks]
-    N -->|disagree| T[Tie-break]
-    N --> R[Referee writes sealed tests]
-    T --> R
-    R --> B[Builder makes the MVP]
-    B --> J[Referee runs tests and judges]
-    J --> L[(Records repo)]
-    L -.->|lessons and related work| S
-```
+<p align="center"><img src="docs/pipeline.svg" alt="Scout, novelty checks, triage, referee writes sealed tests, builder, referee judges, records repo feeding the next scout" width="900"></p>
 
 ## Why it exists
 
