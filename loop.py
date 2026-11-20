@@ -42,6 +42,7 @@ RUNS = RECORDS / "runs"
 SHELL = "PowerShell" if os.name == "nt" else "Bash"
 WEB = ["WebSearch", "WebFetch"]
 PY = [f"{SHELL}(python *)", f"{SHELL}(py *)", f"{SHELL}(pytest *)"]
+R = [f"{SHELL}(Rscript *)", f"{SHELL}(Rscript.exe *)"]
 ROLE_FILES = {"novelty1": "novelty.md", "novelty2": "novelty.md", "tiebreak": "novelty.md", "scout": "scout.md",
               "referee_spec": "referee-spec.md", "builder": "builder.md", "referee_judge": "referee-judge.md", "synth": "synth.md"}
 METRICS = ["date", "run", "role", "agent", "model", "cost_usd", "input", "output", "cache_read", "cache_write",
@@ -161,6 +162,24 @@ def print_usage() -> None:
         print(f"  {name} | {usage_text(five, seven)}{stamp}", flush=True)
 
 
+def add_r_to_path(env: dict[str, str]) -> None:
+    path = env.get("PATH", os.defpath)
+    if os.name != "nt" or shutil.which("Rscript", path=path):
+        return
+    import winreg
+
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(hive, r"Software\R-core\R") as key:
+                install_path, _ = winreg.QueryValueEx(key, "InstallPath")
+        except OSError:
+            continue
+        r_bin = Path(install_path) / "bin"
+        if (r_bin / "Rscript.exe").is_file():
+            env["PATH"] = str(r_bin) + os.pathsep + path
+            return
+
+
 def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -> None:
     """One fresh, isolated agent session in cwd. Results come back as files; cost and tokens go to metrics.csv."""
     r = role_cfg(role)
@@ -170,6 +189,8 @@ def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -
     prompt = (HERE / "roles" / ROLE_FILES[role]).read_text(encoding="utf-8") + skills + (f"\n\n## Task\n\n{task}" if task else "")
     env = {**os.environ, **{k: os.path.expanduser(v) for k, v in a.get("env", {}).items()}}
     tools = tools or ["Read", "Write", "Glob", "Grep", *WEB]
+    if any(tool in R for tool in tools):
+        add_r_to_path(env)
     if a["kind"] == "claude":
         # --safe-mode: no CLAUDE.md, memory, hooks or plugins. --restricted: file tools stay inside cwd.
         cmd = ["claude", "-p", "Do the task in your instructions. Work in the current folder.",
@@ -367,7 +388,7 @@ def run_idea(idea_id: str) -> Path:
     (spec / "idea.md").write_text(idea, encoding="utf-8")
     write_context(spec, track_of(idea))
     related(spec, idea)
-    call("referee_spec", spec, tools=["Read", "Write", "Edit", "Glob", "Grep", *WEB, *PY])
+    call("referee_spec", spec, tools=["Read", "Write", "Edit", "Glob", "Grep", *WEB, *PY, *R])
     criteria = (spec / "criteria.md").read_text(encoding="utf-8")
     if criteria.startswith("UNTESTABLE"):
         return record(idea_id, run, {"verdict": "untestable", "novelty": nov, "evidence": [criteria]})
@@ -414,7 +435,7 @@ def resume(idea_id: str) -> Path:
         "Write only tests/test_repair.py covering concrete failures from that verdict. "
         "Import the MVP from the sibling mvp directory of the judge workspace. "
         "Cover defects with known answers. Leave broader product work for later."
-    ), tools=["Read", "Write", "Edit", "Glob", "Grep", *PY])
+    ), tools=["Read", "Write", "Edit", "Glob", "Grep", *PY, *R])
     tests = regression / "tests" / "test_repair.py"
     if not tests.is_file() or not tests.stat().st_size:
         raise SystemExit("The referee did not produce repair tests.")
@@ -443,7 +464,7 @@ def judge_mvp(idea_id: str, run: Path, spec: Path, mvp: Path, sealed: str,
     shutil.copytree(spec, judge)
     shutil.copytree(spec, run / "referee")
     shutil.copytree(mvp, judge / "mvp", ignore=shutil.ignore_patterns("related"))
-    call("referee_judge", judge, tools=["Read", "Write", "Glob", "Grep", *PY])
+    call("referee_judge", judge, tools=["Read", "Write", "Glob", "Grep", *PY, *R])
     v = read_json(judge / "verdict.json")
     v.update(novelty=novelty_checks, builder=role_cfg("builder")["agent"], referee=role_cfg("referee_judge")["agent"], seal=sealed)
     if previous:
