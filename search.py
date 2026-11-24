@@ -44,8 +44,8 @@ def get(url: str, headers: dict | None = None) -> bytes:
 
 
 def narrowing(fetch, words: list[str], k: int, start: int) -> list[dict]:
-    """AND-style search: drop keywords from the end until something matches, down to two."""
-    for n in range(min(start, len(words)), 1, -1):
+    """AND-style search: drop keywords from the end until something matches, down to three."""
+    for n in range(min(start, len(words)), 2, -1):  # stop at 3: two words match almost anything
         if hits := fetch(words[:n], k):
             return hits
     return []
@@ -98,7 +98,7 @@ SOURCES = {"arxiv": lambda w, k: narrowing(arxiv, w, k, 4), "semantic_scholar": 
 def search(query: str, sources: list[str] | None = None, k: int = 5) -> list[dict]:
     """Top k hits per source. A source that fails (rate limit, no network) is skipped, never fatal."""
     words, hits = keywords(query), []
-    for name in sources or ["arxiv", "semantic_scholar", "github"]:
+    for name in ["arxiv", "semantic_scholar", "github"] if sources is None else sources:  # [] turns the search off
         try:
             hits += SOURCES[name](words, k)
         except Exception as e:  # noqa: BLE001  a cheap pre-check must not stop a run
@@ -111,4 +111,4 @@ def search(query: str, sources: list[str] | None = None, k: int = 5) -> list[dic
 if __name__ == "__main__":
     assert keywords("A Python package for shift-share (Bartik) regressions") == ["shift-share", "Bartik", "regressions"]
     for h in search(" ".join(sys.argv[1:]) or "lag-augmented local projections"):
-        print(f"[{h['source']}] {h['title']}  {h['url']}")
+        print(f"[{h['source']}] {h['title']}  {h['url']}\n    {h['text'][:300]}")

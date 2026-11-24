@@ -17,7 +17,7 @@
   "roles": {
     "precheck": {
       "agent": "claude-a",
-      "model": "haiku",
+      "model": "sonnet",
       "effort": "low"
     },
     "scout": {
@@ -62,13 +62,13 @@
     },
     "synth": {
       "agent": "claude-a",
-      "model": "haiku",
+      "model": "sonnet",
       "effort": "low"
     },
     "triage": {
       "agent": "claude-a",
-      "model": "haiku",
-      "effort": "low"
+      "model": "sonnet",
+      "effort": "medium"
     }
   },
   "fallback": {
