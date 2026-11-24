@@ -33,7 +33,7 @@ def keywords(text: str, n: int = 6) -> list[str]:
 
 def get(url: str, headers: dict | None = None) -> bytes:
     req = urllib.request.Request(url, headers={**AGENT, **(headers or {})})
-    for wait in (3, 0):  # one polite retry: keyless pools (Semantic Scholar) often answer 429 at first
+    for wait in (2, 4, 8, 0):  # exponential backoff on 429, as the Semantic Scholar and arXiv terms ask
         try:
             with urllib.request.urlopen(req, timeout=20) as r:
                 return r.read()
