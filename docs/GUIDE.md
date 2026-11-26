@@ -86,14 +86,14 @@ Each role is a separate agent: a fresh, isolated session with its own instructio
 | Role | Default model | Job |
 |---|---|---|
 | `scout` | Sonnet | Generates ideas and drops the ones with clear prior art |
-| `precheck` | Haiku | Reads the free search results and stops ideas with a clear match |
+| `precheck` | Sonnet | Searches the free APIs with its own queries and stops ideas with a clear match |
 | `novelty1`, `novelty2` | Sonnet, Opus | Two independent prior-art checks |
 | `tiebreak` | Opus | Decides when the two checks disagree |
-| `triage` | Haiku | Decides if a build is worth the time |
+| `triage` | Sonnet | Decides if a build is worth the time |
 | `referee_spec` | Sonnet | Writes the criteria and the sealed tests |
 | `builder` | Sonnet | Builds the MVP from the criteria |
 | `referee_judge` | Opus | Runs the tests and writes the verdict |
-| `synth` | Haiku | Writes the session journal |
+| `synth` | Sonnet | Writes the session journal |
 
 Use `"model": "default"` for Codex's default model. To skip the pre-check or triage, remove that role from `roles`.
 
@@ -128,10 +128,10 @@ On a normal track, novelty decides: an idea that already exists stops after the 
 
 `py loop.py run <idea-id>` tests one idea in these steps:
 
-1. Novelty. First, the pre-check searches the free APIs and one Haiku call reads the hits. A clear match stops the idea here. Otherwise, two agents search for prior art in separate sessions. Both get the same hits as a head start. If they disagree, the tie-break model decides. An idea that exists stops here.
+1. Novelty. First, the pre-check searches the free APIs. One Sonnet call reads the hits and can rerun the search with better queries. A clear match stops the idea here. Otherwise, two agents search for prior art in separate sessions. Both get the same hits as a head start. If they disagree, the tie-break model decides. An idea that exists stops here.
 
    Adoption tracks skip this step.
-2. Triage. One Haiku call reads the idea, the track's criteria and the novelty results. It decides if a build would teach anything new. A typical triage costs about $0.002.
+2. Triage. One Sonnet call reads the idea, the track's criteria and the novelty results. It decides if a build would teach anything new. For a large project, it judges one slice of the first milestone.
 3. Referee spec. The referee writes `criteria.md`, `holdout.md` and pytest tests. The tests go in `.sealed/`, outside the builder's folder.
 4. Build. The builder gets the criteria, the related records and up to two related earlier MVPs. It never sees the tests.
 5. Judge. The referee checks the hash of its tests, runs them, reproduces the result and writes `verdict.json`.
@@ -150,7 +150,7 @@ Before any of this, the scout step drops near-duplicate ideas. It compares the w
 | OpenAlex | needed for more than a few calls a day | `OPENALEX_API_KEY` |
 | GitHub repositories | optional, raises the rate limit | `GITHUB_TOKEN` |
 
-Put keys in environment variables only, never in a settings file. To add OpenAlex, list it in `prior_art.sources`. To try a search by hand, run `py search.py "<title>"`.
+Put keys in environment variables only, never in a settings file. Without keys, the search covers little outside computer science and physics: arXiv has few economics papers, and the keyless Semantic Scholar pool is often rate-limited. For economics and business topics, get the free Semantic Scholar and OpenAlex keys and add `openalex` to the sources. Set `"sources": []` to turn the search off. To add OpenAlex, list it in `prior_art.sources`. To try a search by hand, run `py search.py "<title>"`.
 
 The pre-check says "exists" only when a hit delivers the core feature itself. A paper that describes a method does not count as software that implements it. The pre-check misses new or niche packages, because PyPI has no search API. The agent search catches those. Canaries record the pre-check's catch rate under `precheck/<model>`.
 

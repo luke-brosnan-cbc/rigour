@@ -378,7 +378,8 @@ def precheck(run: Path, idea_text: str) -> dict | None:
     ws.mkdir(parents=True, exist_ok=True)
     (ws / "idea.md").write_text(idea_text, encoding="utf-8")
     (ws / "hits.json").write_text(json.dumps(hits, indent=1), encoding="utf-8")
-    call("precheck", ws, tools=["Read", "Write"])
+    shutil.copy(HERE / "search.py", ws)  # the agent reruns the free search with better queries; no paid web search
+    call("precheck", ws, tools=["Read", "Write", f"{SHELL}(py search.py *)", f"{SHELL}(python search.py *)"])
     return read_json(ws / "novelty.json")
 
 
