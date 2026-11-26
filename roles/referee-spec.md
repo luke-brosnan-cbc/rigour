@@ -8,4 +8,8 @@ Write these files in the current folder:
 
 Read `RELATED.md` first. Name relevant earlier work in `criteria.md`. If the idea's track in `CONTEXT.md` makes novelty optional, test the proposed workflow or adaptation against a realistic baseline. Check the practical gain the idea claims. For other tracks, test the part that prior work leaves open.
 
+Read `KNOWLEDGE.md` if it is there: lessons from earlier runs, with ids. Follow them unless this idea gives a reason not to.
+
+Keep any data the tests need under 200 MB in total, and tell the builder in `criteria.md` to sample bigger sources.
+
 Keep the MVP small enough to build in under an hour. If the idea cannot be tested that way, write `criteria.md` with the single line `UNTESTABLE: <reason>` and stop.

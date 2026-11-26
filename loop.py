@@ -3,7 +3,8 @@
     py loop.py init                     # create the records folder (ideas/, runs/, CONTEXT.md, TEMPLATE.md)
     py loop.py scout "<topic>"          # new ideas into the records (status idea, or dropped with the prior art)
     py loop.py run <idea-id>            # novelty x2 (+ tie-break) -> triage -> referee tests -> build -> judge -> record
-    py loop.py resume <idea-id>          # repair the most recent partial run and judge it again
+    py loop.py resume <idea-id>          # advance the latest works or partial run one step (repair) and judge it again
+    py loop.py stats [days]              # reward per USD, verdicts, canaries, slow or stopped roles, prediction error
     py loop.py canary [n]               # plant n known (dropped) ideas, check the novelty agents catch them
     py loop.py calibration              # canary catch rate per agent
     py loop.py usage [now]              # 5-hour and weekly subscription usage per agent (now = live reading)
@@ -28,12 +29,15 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime
+from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+import memory
 import records
 import search
+import watch
 
 HERE = Path(__file__).resolve().parent
 CFG_FILE = Path(os.environ.get("RIGOUR_CONFIG") or HERE / "config.json")
@@ -77,6 +81,14 @@ ROLE_FILES = {"novelty1": "novelty.md", "novelty2": "novelty.md", "tiebreak": "n
 METRICS = ["date", "run", "role", "agent", "model", "cost_usd", "input", "output", "cache_read", "cache_write",
            "web_searches", "seconds", "error", "tokens_total", "five_hour_pct", "seven_day_pct"]
 now = lambda fmt="%Y%m%d-%H%M": datetime.now().strftime(fmt)  # noqa: E731
+FRONTIER = RECORDS / "frontier.jsonl"
+KNOWLEDGE = RECORDS / "knowledge.jsonl"
+# (minutes, max_usd) per role, about twice the largest call seen so far. A role's own "minutes" and "max_usd"
+# settings override these. max_call_minutes stays the ceiling. Codex reports no cost, so it gets the time limit only.
+ROLE_LIMITS = {"precheck": (5, 0.20), "triage": (5, 0.20), "synth": (5, 0.30),
+               "novelty1": (15, 0.80), "novelty2": (15, 0.80), "tiebreak": (15, 0.80),
+               "scout": (20, 2.50), "referee_spec": (20, 2.00), "referee_judge": (20, 1.50), "builder": (30, 1.50)}
+IDLE_MINUTES = 8  # no output for this long: a hung download, install or test run
 
 
 class Stop(Exception):
@@ -220,6 +232,9 @@ def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -
     tools = tools or ["Read", "Write", "Glob", "Grep", *WEB]
     if any(tool in R for tool in tools):
         add_r_to_path(env)
+    limit_minutes, max_usd = ROLE_LIMITS.get(role, (60, None))
+    minutes = min(r.get("minutes", limit_minutes), CFG.get("max_call_minutes", 60))
+    max_usd = r.get("max_usd", max_usd)
     if a["kind"] == "claude":
         # --safe-mode: no CLAUDE.md, memory, hooks or plugins. --restricted: file tools stay inside cwd.
         cmd = ["claude", "-p", "Do the task in your instructions. Work in the current folder.",
@@ -229,6 +244,8 @@ def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -
                "--tools", ",".join(sorted({t.split("(")[0] for t in tools})), "--allowed-tools", *tools]
         if r.get("fallback_model"):
             cmd += ["--fallback-model", r["fallback_model"]]
+        if max_usd:
+            cmd += ["--max-budget-usd", str(max_usd)]
     else:
         # Codex: give it its own CODEX_HOME in config.json so your AGENTS.md is not loaded. Sessions are saved there
         # (no --ephemeral) because that is where Codex records its usage limits.
@@ -244,28 +261,31 @@ def call(role: str, cwd: Path, task: str = "", tools: list[str] | None = None) -
         cmd.append("-")
     print(f"  [{role}: {r['agent']}/{r['model']}] in {cwd.name}", flush=True)
     t0 = time.time()
-    p = subprocess.run(cmd, cwd=cwd, env=env, timeout=60 * CFG.get("max_call_minutes", 60), capture_output=True,
-                       text=True, encoding="utf-8", errors="replace", input=None if a["kind"] == "claude" else prompt)
-    (cwd / f"_{role}.log").write_text(p.stdout + "\n--- stderr ---\n" + p.stderr, encoding="utf-8")
+    log = cwd / f"_{role}.log"  # written as the call runs, so a killed call still leaves its transcript
+    code, out, err, killed = watch.run_watched(cmd, cwd, env, log, minutes, IDLE_MINUTES,
+                                               None if a["kind"] == "claude" else prompt)
     if a["kind"] == "claude":
-        u = parse_claude(p.stdout)
+        u = parse_claude(out)
     else:
-        u = codex_usage(env.get("CODEX_HOME") or os.path.expanduser("~/.codex"), t0, p.stderr + "\n" + p.stdout)
-    log_metrics(cwd, role, r, u, time.time() - t0, p.stdout + p.stderr)
+        u = codex_usage(env.get("CODEX_HOME") or os.path.expanduser("~/.codex"), t0, err + "\n" + out)
+    log_metrics(cwd, role, r, u, time.time() - t0, out + err, error=killed)
     cost = (u.get("result") or {}).get("total_cost_usd")
     price = f"USD-equivalent ${cost:.3f}" if cost is not None else "USD-equivalent unavailable"
-    print(f"  [{role} complete] {r['agent']} | {usage_text(u['five'], u['seven'])} | {price}", flush=True)
+    print(f"  [{role} {'stopped: ' + killed if killed else 'complete'}] {r['agent']} | {usage_text(u['five'], u['seven'])} | {price}", flush=True)
     if u.get("status", "allowed") not in ("allowed", "allowed_warning"):  # warning = near the limit, still usable
         raise Stop(f"{r['agent']} reports its usage limit as '{u['status']}' during {role}")
+    if killed:
+        why = f"no output for {IDLE_MINUTES} minutes" if killed == "idle" else f"over its {minutes}-minute limit"
+        raise SystemExit(f"{role} ({r['agent']}) stopped: {why}; see {log}")
     # shortcut: matches the limit message text, which the CLIs may change; check _<role>.log if a stop looks wrong
-    failed = p.returncode != 0 or u.get("result", {}).get("is_error")
-    if failed and re.search(r"usage limit|rate limit|limit reached|out of (extra )?usage", p.stdout[-2000:] + p.stderr[-2000:], re.I):
+    failed = code != 0 or u.get("result", {}).get("is_error")
+    if failed and re.search(r"usage limit|rate limit|limit reached|out of (extra )?usage", out[-2000:] + err[-2000:], re.I):
         raise Stop(f"{r['agent']} hit a usage limit during {role}")
-    if p.returncode:
-        raise SystemExit(f"{role} ({r['agent']}) failed (exit {p.returncode}); see {cwd / f'_{role}.log'}")
+    if code:
+        raise SystemExit(f"{role} ({r['agent']}) failed (exit {code}; a max_usd of {max_usd} can end a call early); see {log}")
 
 
-def log_metrics(cwd: Path, role: str, r: dict, u: dict, seconds: float, raw: str = "") -> None:
+def log_metrics(cwd: Path, role: str, r: dict, u: dict, seconds: float, raw: str = "", error: str = "") -> None:
     d = u.get("result") or {}
     us = d.get("usage", {})
     if d:
@@ -289,7 +309,7 @@ def log_metrics(cwd: Path, role: str, r: dict, u: dict, seconds: float, raw: str
         w = csv.writer(f)
         if new:
             w.writerow(METRICS)
-        w.writerow([now("%Y-%m-%d %H:%M"), run, role, r["agent"], r["model"], *vals[:6], round(seconds), vals[6], total,
+        w.writerow([now("%Y-%m-%d %H:%M"), run, role, r["agent"], r["model"], *vals[:6], round(seconds), error or vals[6], total,
                     u.get("five", ""), u.get("seven", "")])
 
 
@@ -340,6 +360,15 @@ def commit(message: str) -> None:
     if not (RECORDS / ".git").exists() or not CFG.get("auto_commit", True):
         return
     subprocess.run(["git", "-c", "core.safecrlf=false", "add", "-A"], cwd=RECORDS, check=True)
+    staged = subprocess.run(["git", "diff", "--cached", "--name-only", "-z"], cwd=RECORDS, capture_output=True,
+                            text=True, encoding="utf-8").stdout.split("\0")
+    big = [f for f in staged if f and (RECORDS / f).is_file() and (RECORDS / f).stat().st_size > watch.BIG_MB * 2**20]
+    if big:  # GitHub refuses files over 100 MB, and one stuck push blocks every later one
+        subprocess.run(["git", "reset", "-q", "--", *big], cwd=RECORDS, check=True)
+        with open(RECORDS / ".gitignore", "a", encoding="utf-8") as f:
+            f.write("".join(f"/{name}\n" for name in big))
+        subprocess.run(["git", "add", ".gitignore"], cwd=RECORDS, check=True)
+        print(f"  not committed, over {watch.BIG_MB} MB (now in .gitignore): {', '.join(big)}")
     if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=RECORDS).returncode:
         subprocess.run(["git", "commit", "-q", "-m", message], cwd=RECORDS, check=True)
         subprocess.run(["git", "push", "-q"], cwd=RECORDS, check=False)
@@ -348,20 +377,45 @@ def commit(message: str) -> None:
 def related(ws: Path, query: str, copy_mvps: int = 0) -> None:
     """Give the agent RELATED.md (top BM25 hits, about 1,500 characters) and, optionally, copies of related earlier MVPs."""
     hits = records.search(RECORDS, query)
-    # one-hop graph expansion: ideas linked (helps/related/blocked_by) to the top idea hits, as digest lines
-    linked, digest = set(), {}
+    # spreading activation: personalized PageRank from the idea hits over shared problems, data, repos and links
+    extra = ""
     if (RECORDS / "graph.json").exists() and (RECORDS / "DIGEST.md").exists():
-        top = set(re.findall(r"ideas/([^.\s]+)\.md", hits))
-        edges = json.loads((RECORDS / "graph.json").read_text(encoding="utf-8"))["edges"]
-        linked = {e["to"] for e in edges if e["from"] in top and e["type"] in ("helps", "related", "blocked_by")} - top
+        top = list(dict.fromkeys(re.findall(r"ideas/([^.\s]+)\.md", hits)))
         digest = {ln.split(" | ")[0]: ln for ln in (RECORDS / "DIGEST.md").read_text(encoding="utf-8").splitlines() if " | " in ln}
-    extra = "".join(f"- linked: {digest[i][:240]}\n" for i in sorted(linked) if i in digest)
+        act = memory.ppr(json.loads((RECORDS / "graph.json").read_text(encoding="utf-8")),
+                         {i: 1 / (n + 1) for n, i in enumerate(top)}) if top else {}
+        linked = [i for i, _ in sorted(act.items(), key=lambda kv: -kv[1]) if i in digest and i not in top][:5]
+        extra = "".join(f"- linked: {digest[i][:240]}\n" for i in linked)
     (ws / "RELATED.md").write_text("# Related earlier records\n\n" + (hits or "None found.\n") + extra, encoding="utf-8")
+    skip = shutil.ignore_patterns("_*", "__pycache__")
     for n, run in enumerate(dict.fromkeys(re.findall(r"runs/([^/\s]+)/", hits))):
         if n >= copy_mvps:
             break
         if (RUNS / run / "mvp").exists():
-            shutil.copytree(RUNS / run / "mvp", ws / "related" / run, ignore=shutil.ignore_patterns("_*", "__pycache__"))
+            shutil.copytree(RUNS / run / "mvp", ws / "related" / run, ignore=lambda d, names: skip(d, names) | watch.skip_big(d, names))
+
+
+def knowledge_pack(ws: Path, role: str, text: str) -> None:
+    """KNOWLEDGE.md: the strongest claims for this role, at most about 1,200 characters."""
+    claims = memory.pack(memory.read_jsonl(KNOWLEDGE), role, text)
+    if claims:
+        (ws / "KNOWLEDGE.md").write_text("# Lessons from earlier runs\n\n" + claims, encoding="utf-8")
+
+
+def read_optional(path: Path, default):
+    """An agent's optional JSON output. Missing or malformed files give the default."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def update_knowledge(ops, log_dir: Path | None = None) -> None:
+    claims, rejected = memory.apply_ops(memory.read_jsonl(KNOWLEDGE), ops, lambda r: (RUNS / r).is_dir())
+    if claims:
+        memory.write_jsonl(KNOWLEDGE, claims)
+    if rejected and log_dir:
+        (log_dir / "knowledge_rejected.json").write_text(json.dumps(rejected, indent=1), encoding="utf-8")
 
 
 def precheck(run: Path, idea_text: str) -> dict | None:
@@ -453,8 +507,14 @@ def run_idea(idea_id: str) -> Path:
         (ws / "idea.md").write_text(idea, encoding="utf-8")
         (ws / "novelty.json").write_text(json.dumps(nov, indent=1), encoding="utf-8")
         write_context(ws, track)
+        knowledge_pack(ws, "triage", idea)
         call("triage", ws, tools=["Read", "Write"])
         t = read_json(ws / "triage.json")
+        try:  # the forecast that the run's outcome is scored against
+            (run / "prediction.json").write_text(json.dumps({"p_works": float(t["p_works"]), "predicted": memory.predicted(t)}),
+                                                 encoding="utf-8")
+        except (KeyError, TypeError, ValueError):
+            pass
         if not t.get("build"):
             return record(idea_id, run, {"verdict": "skip", "novelty": nov, "lessons": f"Triage: {t.get('reason', '')}"})
 
@@ -464,6 +524,7 @@ def run_idea(idea_id: str) -> Path:
     (spec / "idea.md").write_text(idea, encoding="utf-8")
     write_context(spec, track)
     related(spec, idea)
+    knowledge_pack(spec, "referee", idea)
     call("referee_spec", spec, tools=["Read", "Write", "Edit", "Glob", "Grep", *WEB, *PY, *R])
     criteria = (spec / "criteria.md").read_text(encoding="utf-8")
     if criteria.startswith("UNTESTABLE"):
@@ -476,12 +537,15 @@ def run_idea(idea_id: str) -> Path:
     (mvp / "idea.md").write_text(idea, encoding="utf-8")
     (mvp / "criteria.md").write_text(criteria, encoding="utf-8")
     related(mvp, idea, copy_mvps=2)
+    knowledge_pack(mvp, "builder", idea)
     call("builder", mvp, tools=["Read", "Write", "Edit", "Glob", "Grep", *WEB, *PY])
 
     return judge_mvp(idea_id, run, spec, mvp, sealed, nov)
 
 
-def resume(idea_id: str) -> Path:
+def advance(idea_id: str, step: dict | None = None) -> Path:
+    """Take an idea one step further from its latest works or partial run. Without a step, repair the reported defects.
+    Every earlier sealed test stays, so a step cannot lose what earlier runs proved."""
     if Path(idea_id).name != idea_id:
         raise SystemExit("Use an idea ID from the records.")
     path = RECORDS / "ideas" / f"{idea_id}.md"
@@ -489,45 +553,61 @@ def resume(idea_id: str) -> Path:
         raise SystemExit(f"Unknown idea: {idea_id}")
     idea = path.read_text(encoding="utf-8")
     history = re.findall(r"^- \d{4}-\d{2}-\d{2}: run `([^/\\`]+)`:", idea, re.M)
-    if not history:
-        raise SystemExit(f"No completed run for {idea_id}")
-    previous = RUNS / history[-1]
+    previous = next((RUNS / h for h in reversed(history) if (RUNS / h / "referee").is_dir()
+                     and read_optional(RUNS / h / "result.json", {}).get("verdict") in ("works", "partial")), None)
+    if not previous:
+        raise SystemExit(f"No works or partial run with sealed tests for {idea_id}")
     result = read_json(previous / "result.json")
-    if result["verdict"] != "partial":
-        raise SystemExit(f"The last verdict for {idea_id} was {result['verdict']}. Resume requires partial.")
     check_independence()
-    run = RUNS / f"{now()}-repair-{uuid4().hex[:8]}-{idea_id}"
+    run = RUNS / f"{now()}-{'step' if step else 'repair'}-{uuid4().hex[:8]}-{idea_id}"
     run.mkdir()
     spec = HERE / ".sealed" / run.name
     shutil.copytree(previous / "referee", spec)
+    index = 1
+    while (spec / "tests" / f"test_step_{index}.py").exists() or (spec / "tests" / f"test_repair_{index}.py").exists():
+        index += 1
     regression = spec.with_name(f"{run.name}-regressions")
     regression.mkdir()
     shutil.copy2(spec / "criteria.md", regression / "criteria.md")
     shutil.copy2(spec / "idea.md", regression / "idea.md")
     (regression / "RELATED.md").write_text("\n".join(result.get("evidence", []) + [result.get("lessons", "")]),
                                            encoding="utf-8")
-    call("referee_spec", regression, task=(
-        "This is a repair test plan. Keep the existing acceptance criteria. Use RELATED.md for the prior verdict. "
-        "Write only tests/test_repair.py covering concrete failures from that verdict. "
-        "Import the MVP from the sibling mvp directory of the judge workspace. "
-        "Cover defects with known answers. Leave broader product work for later."
-    ), tools=["Read", "Write", "Edit", "Glob", "Grep", *PY, *R])
+    if step:
+        task = ("This is a next-step test plan. Keep the existing acceptance criteria and tests. "
+                f"The next step: {step['step']}\n"
+                "Write criteria_step.md: numbered, checkable statements for this step only. The builder sees this file. "
+                "Write tests/test_repair.py with tests for this step only. RELATED.md holds the prior verdict. "
+                "Import the MVP from the sibling mvp directory of the judge workspace. Check real results with known answers.")
+    else:
+        task = ("This is a repair test plan. Keep the existing acceptance criteria. Use RELATED.md for the prior verdict. "
+                "Write only tests/test_repair.py covering concrete failures from that verdict. "
+                "Import the MVP from the sibling mvp directory of the judge workspace. "
+                "Cover defects with known answers. Leave broader product work for later.")
+    call("referee_spec", regression, task=task, tools=["Read", "Write", "Edit", "Glob", "Grep", *PY, *R])
     tests = regression / "tests" / "test_repair.py"
     if not tests.is_file() or not tests.stat().st_size:
         raise SystemExit("The referee did not produce repair tests.")
-    index = 1
-    while (spec / "tests" / f"test_repair_{index}.py").exists():
-        index += 1
-    shutil.copy2(tests, spec / "tests" / f"test_repair_{index}.py")
+    shutil.copy2(tests, spec / "tests" / f"test_{'step' if step else 'repair'}_{index}.py")
+    step_criteria = (regression / "criteria_step.md").read_text(encoding="utf-8") if (regression / "criteria_step.md").exists() else ""
+    if step:
+        with open(spec / "criteria.md", "a", encoding="utf-8") as f:
+            f.write(f"\n\n## Step {index}: {step['step']}\n\n{step_criteria}\n")
     sealed = seal(spec)
 
     mvp = run / "mvp"
-    shutil.copytree(previous / "mvp", mvp, ignore=shutil.ignore_patterns("related", "__pycache__", ".pytest_cache", ".venv"))
-    (mvp / "REPAIR.md").write_text(result.get("lessons", ""), encoding="utf-8")
-    call("builder", mvp, task=(
-        "Repair the existing MVP in place. Read REPAIR.md for the referee's feedback. "
-        "Fix the defects within the original acceptance criteria and update REPORT.md."
-    ), tools=["Read", "Write", "Edit", "Glob", "Grep", *PY])
+    shutil.copytree(previous / "mvp", mvp, ignore=watch.skip_big)
+    shutil.copy2(spec / "criteria.md", mvp / "criteria.md")
+    knowledge_pack(mvp, "builder", idea)
+    if step:
+        (mvp / "REPAIR.md").write_text(f"# Next step\n\n{step['step']}\n\n## Criteria for this step\n\n{step_criteria}\n\n"
+                                       f"## The referee's feedback on the last run\n\n{result.get('lessons', '')}\n", encoding="utf-8")
+        builder_task = ("Extend the existing MVP in place. Read REPAIR.md: the next step, its criteria and the referee's last "
+                        "feedback. Keep everything that already works, because the earlier tests still run. Update REPORT.md.")
+    else:
+        (mvp / "REPAIR.md").write_text(result.get("lessons", ""), encoding="utf-8")
+        builder_task = ("Repair the existing MVP in place. Read REPAIR.md for the referee's feedback. "
+                        "Fix the defects within the original acceptance criteria and update REPORT.md.")
+    call("builder", mvp, task=builder_task, tools=["Read", "Write", "Edit", "Glob", "Grep", *PY])
     return judge_mvp(idea_id, run, spec, mvp, sealed, result.get("novelty", {}), previous.name)
 
 
@@ -539,9 +619,13 @@ def judge_mvp(idea_id: str, run: Path, spec: Path, mvp: Path, sealed: str,
     judge = run / "judge"
     shutil.copytree(spec, judge)
     shutil.copytree(spec, run / "referee")
-    shutil.copytree(mvp, judge / "mvp", ignore=shutil.ignore_patterns("related"))
+    shutil.copytree(mvp, judge / "mvp", ignore=watch.skip_big)
     call("referee_judge", judge, tools=["Read", "Write", "Glob", "Grep", *PY, *R])
     v = read_json(judge / "verdict.json")
+    claims = v.get("claims") if isinstance(v.get("claims"), dict) else {}
+    ids = lambda key: [i for i in claims.get(key) or [] if isinstance(i, str)] if isinstance(claims.get(key), list) else []  # noqa: E731
+    update_knowledge([{"op": "support", "id": i, "evidence": [run.name]} for i in ids("held")]
+                     + [{"op": "contra", "id": i, "evidence": [run.name]} for i in ids("failed")])
     v.update(novelty=novelty_checks, builder=role_cfg("builder")["agent"], referee=role_cfg("referee_judge")["agent"], seal=sealed)
     if previous:
         v["previous_run"] = previous
@@ -557,9 +641,15 @@ def record(idea_id: str, run: Path, v: dict) -> Path:
     path = RECORDS / "ideas" / f"{idea_id}.md"
     text = re.sub(r"^updated: .*$", f"updated: {now('%Y-%m-%d')}", path.read_text(encoding="utf-8"), count=1, flags=re.M)
     status = {"works": "prototype", "exists": "dropped", "review": "parked", "error": "parked", "skip": "parked"}.get(v["verdict"])
+    if v["verdict"] == "error" and not re.search(r"^status: idea", text, re.M):
+        status = None  # a failed step must not park an idea that already has a working prototype
     if status:
         text = re.sub(r"^status: .*$", f"status: {status}", text, count=1, flags=re.M)
     path.write_text(text.rstrip("\n") + "\n" + line, encoding="utf-8")
+    if (run / "prediction.json").exists():
+        memory.log_prediction(RECORDS / "predictions.csv", run.name, idea_id, read_optional(run / "prediction.json", {}), v)
+    if v["verdict"] in ("works", "partial"):
+        memory.add_steps(FRONTIER, idea_id, run.name, v.get("next_steps"))
     rebuild()
     commit(f"{idea_id}: {v['verdict']}")
     print(line.strip())
@@ -584,13 +674,16 @@ def near_duplicate(idea_text: str, threshold: float | None = None) -> str | None
     return best[1] if best[0] >= threshold else None
 
 
-def add_ideas(folder: Path) -> list[str]:
+def add_ideas(folder: Path, tag: str | None = None) -> list[str]:
     added = []
     for p in sorted(folder.glob("*.md")):
         if (RECORDS / "ideas" / p.name).exists():
             print(f"  skip {p.name}: already in the records")
             continue
         text = p.read_text(encoding="utf-8")
+        if tag:  # e.g. "evolved", so stats can compare evolved ideas with fresh ones
+            text = re.sub(r"^tags: \[(.*)\]", lambda m: f"tags: [{m.group(1) + ', ' if m.group(1).strip() else ''}{tag}]",
+                          text, count=1, flags=re.M)
         dup = near_duplicate(text) if re.search(r"^status: idea", text, re.M) else None
         if dup:  # caught before any agent spends on it
             print(f"  {p.stem}: near-duplicate of {dup}, recorded as dropped")
@@ -637,9 +730,30 @@ def write_context(ws: Path, track: str | None) -> None:
     (ws / "CONTEXT.md").write_text("".join(keep), encoding="utf-8")
 
 
+def parents_for(track: str | None) -> list[str]:
+    """Parent ideas for an evolve scout: elites (best latest reward per track and problem), sampled by reward."""
+    niche = {}
+    for p in (RECORDS / "ideas").glob("*.md"):
+        try:
+            meta = records.parse(p)
+        except ValueError:
+            continue
+        t = track_of(p.read_text(encoding="utf-8"))
+        if meta["status"] != "dropped" and (track is None or t == track):
+            niche[p.stem] = (t, (meta["problems"] or [""])[0])
+    return memory.sample_parents(memory.elites(niche, memory.history(RUNS)))
+
+
 def scout(topic: str, track: str | None = None) -> list[str]:
-    ws = RUNS / (f"{now()}-scout" + (f"-{track}" if track else ""))
+    # every second scout call evolves the best earlier ideas (crossover and mutation), the others start fresh
+    parents = parents_for(track) if len(list(RUNS.glob("*-scout*"))) % 2 else []
+    evolve = len(parents) >= 2
+    ws = RUNS / (f"{now()}-scout" + ("-evolve" if evolve else "") + (f"-{track}" if track else ""))
     (ws / "out").mkdir(parents=True)
+    if evolve:
+        (ws / "parents").mkdir()
+        for pid in parents:
+            shutil.copy(RECORDS / "ideas" / f"{pid}.md", ws / "parents")
     for f in ("DIGEST.md", "TEMPLATE.md"):
         if (RECORDS / f).exists():
             shutil.copy(RECORDS / f, ws)
@@ -656,9 +770,14 @@ def scout(topic: str, track: str | None = None) -> list[str]:
                  "skill, then apply that track's adoption criteria in CONTEXT.md when deciding what survives. "
                  "An existing tool or method can support a proposal with a useful, testable adoption plan.")
     task += f"\nWrite at most {CFG.get('scout_survivors', 3)} survivors."
+    if evolve:
+        task += ("\nEvolve mode. `parents/` holds the best earlier ideas, with their run results in Progress. "
+                 "Make your survivors one crossover that combines two parents, one mutation that changes one thing about "
+                 "one parent (its user, its data or its method), and one fresh idea. List each child's parents in `related`.")
     related(ws, task)
+    knowledge_pack(ws, "scout", task)
     call("scout", ws, task=task)
-    added = add_ideas(ws / "out")
+    added = add_ideas(ws / "out", tag="evolved" if evolve else None)
     rebuild()
     commit(f"scout: {len(added)} ideas")
     print(f"added {len(added)} ideas: {', '.join(added)}")
@@ -719,6 +838,27 @@ def untested(track: str | None = None) -> list[str]:
     return out
 
 
+def open_steps(track: str | None) -> list[dict]:
+    """Open frontier items whose idea still exists, is not dropped and (if given) belongs to the track."""
+    out = []
+    for s in memory.read_jsonl(FRONTIER):
+        path = RECORDS / "ideas" / f"{s['idea']}.md"
+        if s["status"] != "open" or not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not re.search(r"^status: dropped", text, re.M) and (track is None or track_of(text) == track):
+            out.append(s)
+    return out
+
+
+def mark_plateau(idea_id: str) -> None:
+    memory.close_steps(FRONTIER, "plateau", idea=idea_id)
+    path = RECORDS / "ideas" / f"{idea_id}.md"
+    path.write_text(path.read_text(encoding="utf-8").rstrip("\n") + f"\n- {now('%Y-%m-%d')}: plateau: the last two steps "
+                    "did not raise the reward. Ready for a human decision.\n", encoding="utf-8")
+    print(f"   {idea_id}: plateau, open steps closed")
+
+
 def session(topic: str = "", cycles: int | None = None, minutes: float | None = None) -> None:
     """The unattended loop. A new idea starts only before the deadline; the one in progress always finishes."""
     track, topic = split_track(topic)
@@ -729,6 +869,7 @@ def session(topic: str = "", cycles: int | None = None, minutes: float | None = 
     go = lambda: time.time() < deadline and not over_budget(stamp)  # noqa: E731  checked before anything new starts
     rebuild()  # orient: fresh digest and search index before any agent runs
     canary_pool = dropped_ideas()
+    steps_done: Counter = Counter()  # advance steps per idea this session, so one idea cannot take the whole night
     c = 0
     try:
         while go() and (cycles is None or c < cycles):
@@ -743,15 +884,30 @@ def session(topic: str = "", cycles: int | None = None, minutes: float | None = 
             if len(queue) < 2 and go():
                 scout(topic, track)
                 queue = untested(track)
-            if not queue or not go():
+            hist = memory.history(RUNS)
+            items = [{"id": i, "idea": i, "kind": "test"} for i in queue]
+            items += [s for s in open_steps(track) if steps_done[s["idea"]] < memory.MAX_STEPS_PER_SESSION]
+            if not items or not go():
                 break
+            item = memory.choose(items, hist, sum(len(memory.judged(hist, i)) for i in hist))
+            print(f"   next: {item['id']} ({item['kind']})" + (f": {item['step'][:120]}" if item["kind"] != "test" else ""))
             try:
-                run_idea(queue[0])
+                if item["kind"] == "test":
+                    run_idea(item["idea"])
+                else:
+                    steps_done[item["idea"]] += 1
+                    done = advance(item["idea"], item)
+                    memory.close_steps(FRONTIER, "done", item_id=item["id"], run=done.name,
+                                       value=memory.reward(read_json(done / "result.json")))
+                    if memory.plateau(memory.history(RUNS), item["idea"]):
+                        mark_plateau(item["idea"])
             except (SystemExit, subprocess.TimeoutExpired) as e:  # one failed run must not stop the night
                 print(f"  run failed: {e}")
-                failed = RUNS / f"{now()}-{queue[0]}-error"
+                failed = RUNS / f"{now()}-{item['idea']}-error"
                 failed.mkdir(parents=True, exist_ok=True)
-                record(queue[0], failed, {"verdict": "error", "lessons": f"Run error: {e}"})
+                record(item["idea"], failed, {"verdict": "error", "lessons": f"Run error: {e}"})
+                if item["kind"] != "test":  # not retried automatically: a human looks at the log first
+                    memory.close_steps(FRONTIER, "error", item_id=item["id"], run=failed.name)
     except Stop as e:
         print(f"Stopping early: {e}. The idea in progress stays untested and goes first next time.")
         write_session_report(start)
@@ -832,18 +988,135 @@ def synthesise(since: datetime | None = None) -> None:
             shutil.copy(RECORDS / f, ws)
     summary = tonight_summary(since)
     (ws / "TONIGHT.md").write_text("# Tonight\n\n" + summary, encoding="utf-8")
+    # prioritized replay: the runs whose outcome surprised triage most come first
+    surprise = memory.surprises(RECORDS / "predictions.csv")
+    tonight = [f.parent.name for f in RUNS.glob("*/result.json") if datetime.fromtimestamp(f.stat().st_mtime) >= since]
+    ranked = sorted(tonight, key=lambda r: -abs(surprise.get(r, 0)))[:6]
+    (ws / "REPLAY.md").write_text("# Runs to learn from, most surprising first\n\n" + "".join(
+        f"- {r}: surprise {surprise[r]:+.2f} (actual reward minus predicted)\n" if r in surprise else f"- {r}: no prediction\n"
+        for r in ranked), encoding="utf-8")
+    (ws / "CLAIMS.md").write_text(memory.render_knowledge(memory.read_jsonl(KNOWLEDGE)), encoding="utf-8")
     related(ws, summary)
     call("synth", ws, tools=["Read", "Write", "Glob", "Grep"])
     (RECORDS / "journal").mkdir(exist_ok=True)
     if (ws / "journal.md").exists():
         shutil.copy(ws / "journal.md", RECORDS / "journal" / f"{now('%Y-%m-%d-%H%M')}.md")
-    links = json.loads((ws / "links.json").read_text(encoding="utf-8")) if (ws / "links.json").exists() else []
-    for link in links:
-        add_link(link.get("from", ""), link.get("to", ""), link.get("type", "related"))
+    links = read_optional(ws / "links.json", [])
+    for link in links if isinstance(links, list) else []:
+        if isinstance(link, dict):
+            add_link(link.get("from", ""), link.get("to", ""), link.get("type", "related"))
+    update_knowledge(read_optional(ws / "knowledge_ops.json", []), ws)
+    merges = read_optional(ws / "merges.json", [])
+    merged = sum(merge_ideas(m.get("keep", ""), m.get("drop", "")) for m in merges if isinstance(m, dict)) \
+        if isinstance(merges, list) else 0
     added = add_ideas(ws / "out")
     rebuild()
-    commit(f"synthesis: {len(links)} links, {len(added)} combined ideas")
-    print(f"synthesis: journal written, {len(links)} links, {len(added)} combined ideas")
+    msg = f"synthesis: {len(links)} links, {len(added)} combined ideas, {merged} merges"
+    commit(msg)
+    print(msg)
+
+
+def section(text: str, name: str) -> str:
+    m = re.search(rf"^## {re.escape(name)}\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    return m.group(1).strip() if m else ""
+
+
+def set_list(text: str, field: str, items: list[str]) -> str:
+    """Set a `field: [a, b]` front-matter line, adding it if missing."""
+    new = f"{field}: [{', '.join(items)}]"
+    m = re.search(rf"^{field}: \[.*\]$", text, re.M)
+    return text.replace(m.group(0), new, 1) if m else text.replace("\n---\n", f"\n{new}\n---\n", 1)
+
+
+def merge_ideas(keep: str, drop: str) -> bool:
+    """Join two ideas that are the same idea. Ideas with runs that worked are never merged automatically."""
+    kp, dp = RECORDS / "ideas" / f"{keep}.md", RECORDS / "ideas" / f"{drop}.md"
+    if keep == drop or Path(keep).name != keep or Path(drop).name != drop or not kp.exists() or not dp.exists():
+        return False
+    kt, dt = kp.read_text(encoding="utf-8"), dp.read_text(encoding="utf-8")
+    if any(re.search(r"^status: (prototype|in-use)", t, re.M) for t in (kt, dt)):
+        return False
+    a, b = words(kt), words(dt)
+    if not a or not b or len(a & b) / len(a | b) < 0.2:
+        return False
+    km, dm = records.parse(kp), records.parse(dp)
+    for field in ("problems", "data", "related", "helps"):
+        kt = set_list(kt, field, [x for x in dict.fromkeys(km[field] + dm[field]) if x not in (keep, drop)])
+    moved = "".join(f"\n### {name}\n\n{body}\n" for name in ("Problem", "Idea", "Prior art checked") if (body := section(dt, name)))
+    kp.write_text(kt.rstrip("\n") + f"\n\n## Merged from {drop}\n{moved}", encoding="utf-8")
+    dt = re.sub(r"^status: .*$", "status: dropped", dt, count=1, flags=re.M)
+    dp.write_text(dt.rstrip("\n") + f"\n- {now('%Y-%m-%d')}: merged into `{keep}`.\n", encoding="utf-8")
+    for p in (RECORDS / "ideas").glob("*.md"):  # links to the dropped idea now point at the kept one
+        if p in (kp, dp):
+            continue
+        text, meta = p.read_text(encoding="utf-8"), records.parse(p)
+        for field in ("helps", "related", "blocked_by"):
+            if drop in meta[field]:
+                text = set_list(text, field, [x for x in dict.fromkeys(keep if x == drop else x for x in meta[field]) if x != p.stem])
+        p.write_text(text, encoding="utf-8")
+    print(f"  merged {drop} into {keep}")
+    return True
+
+
+def stats(days: int = 30) -> None:
+    """Is the loop getting better? Reward per USD by day, canaries, slow or stopped roles, prediction error."""
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    day = lambda name: f"{name[:4]}-{name[4:6]}-{name[6:8]}"  # noqa: E731  run folders start YYYYMMDD
+    rows: dict[str, dict] = {}
+    blank = lambda: {"verdicts": Counter(), "reward": 0.0, "usd": 0.0, "caught": 0, "canaries": 0, "dups": 0}  # noqa: E731
+    for f in RUNS.glob("*/result.json"):
+        d = day(f.parent.name)
+        v = read_optional(f, {})
+        if d >= since and v.get("verdict"):
+            r = rows.setdefault(d, blank())
+            r["verdicts"][v["verdict"]] += 1
+            r["reward"] += memory.reward(v) or 0
+    metric_rows = list(csv.DictReader(open(RECORDS / "metrics.csv", encoding="utf-8"))) if (RECORDS / "metrics.csv").exists() else []
+    for m in metric_rows:
+        if m["date"][:10] >= since:
+            rows.setdefault(m["date"][:10], blank())["usd"] += float(m["cost_usd"] or 0)
+    if (RECORDS / "calibration.csv").exists():
+        for c in csv.DictReader(open(RECORDS / "calibration.csv", encoding="utf-8")):
+            if c["date"] >= since:
+                r = rows.setdefault(c["date"], blank())
+                r["canaries"] += 1
+                r["caught"] += c["caught"] == "True"
+    for p in (RECORDS / "ideas").glob("*.md"):
+        for d in re.findall(r"^- (\d{4}-\d{2}-\d{2}): dropped before testing, near-duplicate", p.read_text(encoding="utf-8"), re.M):
+            if d >= since:
+                rows.setdefault(d, blank())["dups"] += 1
+    print("day        | verdicts                         | reward |   USD | reward/USD | canaries | dups")
+    for d, r in sorted(rows.items()):
+        verdicts = ", ".join(f"{k} {n}" for k, n in r["verdicts"].most_common())
+        per = f"{r['reward'] / r['usd']:.2f}" if r["usd"] else "-"
+        canaries = f"{r['caught']}/{r['canaries']}" if r["canaries"] else "-"
+        print(f"{d} | {verdicts[:32]:32} | {r['reward']:6.2f} | {r['usd']:5.2f} | {per:>10} | {canaries:>8} | {r['dups']:>4}")
+    print("\nrole           | calls | median s | max s | mean tokens | stopped")
+    by_role: dict[str, list[dict]] = {}
+    for m in metric_rows:
+        if m["date"][:10] >= since:
+            by_role.setdefault(m["role"], []).append(m)
+    for role, ms in sorted(by_role.items()):
+        secs = sorted(int(m["seconds"] or 0) for m in ms)
+        toks = [int(m["tokens_total"]) for m in ms if (m.get("tokens_total") or "").isdigit()]
+        stopped = sum(m["error"] in ("timeout", "idle") for m in ms)
+        print(f"{role:14} | {len(ms):5} | {secs[len(secs) // 2]:8} | {secs[-1]:5} | {sum(toks) // len(toks) if toks else 0:11} | {stopped:7}")
+    scores = memory.prediction_scores(RECORDS / "predictions.csv")
+    if scores:
+        print(f"\nTriage predictions (last {scores[2]}): mean absolute error {scores[0]:.2f}, Brier score {scores[1]:.2f}")
+    hist = memory.history(RUNS)
+    first = {"evolved": [], "fresh": []}
+    for p in (RECORDS / "ideas").glob("*.md"):
+        runs = memory.judged(hist, p.stem)
+        if runs:
+            first["evolved" if re.search(r"^tags: \[.*\bevolved\b", p.read_text(encoding="utf-8"), re.M) else "fresh"].append(runs[0]["reward"])
+    if first["evolved"]:
+        mean = lambda xs: sum(xs) / len(xs) if xs else 0  # noqa: E731
+        print(f"First-run reward: evolved {mean(first['evolved']):.2f} (n={len(first['evolved'])}), "
+              f"fresh {mean(first['fresh']):.2f} (n={len(first['fresh'])})")
+    steps = memory.read_jsonl(FRONTIER)
+    if steps:
+        print("Frontier: " + ", ".join(f"{k} {n}" for k, n in Counter(s["status"] for s in steps).most_common()))
 
 
 def add_link(src: str, dst: str, kind: str) -> None:
@@ -853,10 +1126,8 @@ def add_link(src: str, dst: str, kind: str) -> None:
     text = path.read_text(encoding="utf-8")
     m = re.search(rf"^{kind}: \[(.*)\]$", text, re.M)
     items = [x.strip() for x in m.group(1).split(",") if x.strip()] if m else []
-    if dst not in items:
-        new = f"{kind}: [{', '.join(items + [dst])}]"
-        text = text.replace(m.group(0), new, 1) if m else text.replace("\n---\n", f"\n{new}\n---\n", 1)
-        path.write_text(text, encoding="utf-8")
+    if dst not in items and dst != src:
+        path.write_text(set_list(text, kind, items + [dst]), encoding="utf-8")
 
 
 def schedule(at: str, minutes: str = "60") -> None:
@@ -887,7 +1158,7 @@ def init() -> None:
             shutil.copy(HERE / "templates" / name, RECORDS / name)
     gi = RECORDS / ".gitignore"
     if not gi.exists():
-        gi.write_text("search.sqlite\n__pycache__/\n*.pyc\n", encoding="utf-8")
+        gi.write_text("search.sqlite\n__pycache__/\n*.pyc\n_data/\n_download/\n*.parquet\n.venv/\n", encoding="utf-8")
     rebuild()
     print(f"Records folder ready: {RECORDS}. Edit CONTEXT.md first.")
 
@@ -897,7 +1168,7 @@ if __name__ == "__main__":
     num = lambda i, d: float(args[i]) if len(args) > i else d  # noqa: E731
     t, rest = split_track(" ".join(args if cmd == "scout" else args[1:]))
     {"init": init, "scout": lambda: scout(rest, t), "run": lambda: run_idea(args[0]),
-     "resume": lambda: resume(args[0]),
+     "resume": lambda: advance(args[0]), "stats": lambda: stats(int(num(0, 30))),
      "canary": lambda: canary(int(num(0, 1))), "calibration": calibration, "usage": lambda: usage(args[:1] == ["now"]),
      "auto": lambda: session(" ".join(args[1:]), cycles=int(num(0, 3))),
      "night": lambda: session(" ".join(args[1:]), minutes=num(0, 60)),

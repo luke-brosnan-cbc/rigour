@@ -14,6 +14,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import memory
+
 STATUSES = ["idea", "exploring", "prototype", "in-use", "parked", "dropped"]
 LIST_FIELDS = ["tags", "problems", "repos", "data", "helps", "related", "blocked_by"]
 REQUIRED = ["id", "title", "status", "updated"]
@@ -93,13 +95,22 @@ def index(ideas: dict, problems: list[str]) -> str:
     return "\n".join(out)
 
 
-def digest(ideas: dict) -> str:
-    """One line per idea, built by script (no LLM), so an agent gets the whole state in a few hundred tokens."""
+def digest(ideas: dict, frontier: list[dict] | None = None) -> str:
+    """One line per live idea, built by script (no LLM), so an agent gets the whole state in a few hundred tokens.
+    Dropped ideas get their ids only: the duplicate filter and BM25 still see their full files."""
     order = lambda kv: (STATUSES.index(kv[1]["status"]) if kv[1]["status"] in STATUSES else 9, kv[0])  # noqa: E731
     out = ["# Digest", "", "id | status | title | problems | last progress", ""]
     for i, m in sorted(ideas.items(), key=order):
+        if m["status"] == "dropped":
+            continue
         last = [ln for ln in m["body"].splitlines() if ln.startswith("- 20")]
         out.append(f"{i} | {m['status']} | {m['title']} | {','.join(m['problems'])} | {last[-1][2:180] if last else ''}")
+    dropped = sorted(i for i, m in ideas.items() if m["status"] == "dropped")
+    if dropped:
+        out += ["", f"Dropped (ids only): {', '.join(dropped)}"]
+    steps = [s for s in frontier or [] if s["status"] == "open"][-10:]
+    if steps:
+        out += ["", "## Open next steps", ""] + [f"- {s['id']} ({s['kind']}): {s['step'][:200]}" for s in steps]
     return "\n".join(out) + "\n"
 
 
@@ -136,7 +147,9 @@ def build(root: Path) -> int:
     ideas = {p.stem: parse(p) for p in sorted((root / "ideas").glob("*.md"))}
     problems = check(ideas)
     (root / "INDEX.md").write_text(index(ideas, problems), encoding="utf-8")
-    (root / "DIGEST.md").write_text(digest(ideas), encoding="utf-8")
+    (root / "DIGEST.md").write_text(digest(ideas, memory.read_jsonl(root / "frontier.jsonl")), encoding="utf-8")
+    if (root / "knowledge.jsonl").exists():
+        (root / "KNOWLEDGE.md").write_text(memory.render_knowledge(memory.read_jsonl(root / "knowledge.jsonl")), encoding="utf-8")
     g = graph(ideas)
     (root / "graph.json").write_text(json.dumps(g, indent=1), encoding="utf-8")
     index_search(root, ideas)
