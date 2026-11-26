@@ -12,6 +12,7 @@
     "per_source": 5
   },
   "auto_commit": true,
+  "auto_synthesis": true,
   "max_call_minutes": 60,
   "task_name": "rigour-night",
   "roles": {
