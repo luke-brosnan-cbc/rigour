@@ -1,6 +1,6 @@
 # rigour v2: a memory that learns, and a loop that pursues its best ideas
 
-Status: plan, not started. Written 2026-11-26 against rigour commit `0735217`.
+Status: built on branch `v2` (2026-11-26). Written against rigour commit `0735217`.
 Reader: the model that will build it. Read all of this file before you change any code.
 
 ## 0. Rules for the builder

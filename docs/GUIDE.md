@@ -63,7 +63,7 @@ Settings that hold a set of values (`roles`, `agents`, `budget`) merge one level
 | Setting | Default | What it does |
 |---|---|---|
 | `records` | `~/research-records` | The records folder or git remote |
-| `roles` | see the file | The agent, model, effort and skills for each role |
+| `roles` | see the file | The agent, model, effort, skills and limits (`minutes`, `max_usd`) for each role |
 | `agents` | `claude-a`, `claude-b`, `codex` | Each agent's kind (`claude` or `codex`) and its environment variables |
 | `fallback` | `{"codex": "claude-b"}` | The agent to use when Codex is not installed |
 | `adoption_tracks` | `[]` | Tracks where novelty does not decide anything |
@@ -73,8 +73,8 @@ Settings that hold a set of values (`roles`, `agents`, `budget`) merge one level
 | `budget` | `session_usd` 5, `day_usd` 10 | Spending caps. See [Budgets and usage](#budgets-and-usage). |
 | `independence` | `session` | How different the builder and the referee must be |
 | `auto_commit` | `true` | Commit and push the records repo after each step |
-| `auto_synthesis` | `false` | Run `synthesise` after each session |
-| `max_call_minutes` | `60` | The timeout for one agent call |
+| `auto_synthesis` | `true` | Run `synthesise` after each session. It updates the claim store, so leave it on. |
+| `max_call_minutes` | `60` | The ceiling on any role's time limit |
 | `task_name` | `rigour-night` | The name of the scheduled task |
 
 Two environment variables override the files. `RIGOUR_CONFIG` selects a different `config.json`. `RECORDS` selects a different records location.
@@ -93,7 +93,7 @@ Each role is a separate agent: a fresh, isolated session with its own instructio
 | `referee_spec` | Sonnet | Writes the criteria and the sealed tests |
 | `builder` | Sonnet | Builds the MVP from the criteria |
 | `referee_judge` | Opus | Runs the tests and writes the verdict |
-| `synth` | Sonnet | Writes the session journal |
+| `synth` | Sonnet | Writes the session journal, links and merges ideas, and updates the claim store |
 
 Use `"model": "default"` for Codex's default model. To skip the pre-check or triage, remove that role from `roles`.
 
@@ -131,11 +131,11 @@ On a normal track, novelty decides: an idea that already exists stops after the 
 1. Novelty. First, the pre-check searches the free APIs. One Sonnet call reads the hits and can rerun the search with better queries. A clear match stops the idea here. Otherwise, two agents search for prior art in separate sessions. Both get the same hits as a head start. If they disagree, the tie-break model decides. An idea that exists stops here.
 
    Adoption tracks skip this step.
-2. Triage. One Sonnet call reads the idea, the track's criteria and the novelty results. It decides if a build would teach anything new. For a large project, it judges one slice of the first milestone.
+2. Triage. One Sonnet call reads the idea, the track's criteria and the novelty results. It decides if a build would teach anything new. For a large project, it judges one slice of the first milestone. It also forecasts the chance that the build works. rigour scores that forecast against the verdict.
 3. Referee spec. The referee writes `criteria.md`, `holdout.md` and pytest tests. The tests go in `.sealed/`, outside the builder's folder.
 4. Build. The builder gets the criteria, the related records and up to two related earlier MVPs. It never sees the tests.
-5. Judge. The referee checks the hash of its tests, runs them, reproduces the result and writes `verdict.json`.
-6. Record. rigour adds a dated line to the idea, sets its status, rebuilds the index and commits.
+5. Judge. The referee checks the hash of its tests, runs them, reproduces the result and writes `verdict.json`. The verdict proposes up to three next steps, and it says which stored claims the run confirmed or contradicted.
+6. Record. rigour adds a dated line to the idea, sets its status, adds the next steps to `frontier.jsonl`, rebuilds the index and commits.
 
 Before any of this, the scout step drops near-duplicate ideas. It compares the words of each new idea with the existing records. It uses no LLM.
 
@@ -166,14 +166,50 @@ py loop.py unschedule
 A session follows these steps:
 
 1. It rebuilds the digest and the search index. This step uses no LLM.
-2. It runs cycles. Each cycle tests the oldest untested idea. If fewer than two ideas wait, the scout runs first. Every third cycle runs a canary. A failed run parks its idea, and the session continues.
+2. It runs cycles. If fewer than two untested ideas wait, the scout runs first. Then each cycle picks the best next item: a new idea to test, or the next step of an idea that already has a run. See [Pursuit](#pursuit). Every third cycle runs a canary. A failed run parks a new idea, and the session continues.
 3. It writes a report to `journal/` and commits the records.
 
 `night` starts new ideas only before the time is up. The idea in progress always finishes. `auto` counts cycles and has no time limit.
 
 `schedule` uses Windows Task Scheduler. On macOS and Linux, it prints a cron line for you to add. The computer must be on, awake and logged in at that time. The log goes to `logs/<task_name>.log`.
 
-To continue a partial run, use `py loop.py resume <idea-id>`. rigour copies the last MVP and adds regression tests for the reported defects. The builder then tries one repair.
+To repair a run by hand, use `py loop.py resume <idea-id>`. rigour copies the last MVP that worked or partly worked, and adds regression tests for the reported defects. The builder then tries one repair.
+
+## Pursuit
+
+The loop does not stop at the first build that works. Each verdict proposes up to three next steps. A `repair` step fixes a defect. A `deepen` step takes the idea one milestone further. They wait in `frontier.jsonl`, and `DIGEST.md` lists the open ones.
+
+Each cycle scores every untested idea and every open step, and runs the highest score:
+
+- An untested idea scores a fixed base value.
+- A step scores the latest reward of its idea, reduced a little for each earlier run of that idea.
+- Every item gets a bonus that shrinks as its idea gets more runs. This is the UCB1 rule from bandit problems. It keeps some effort on ideas that the loop knows little about.
+
+The reward of a run is 1.0 for `works` with high usefulness, 0.7 for medium, 0.4 for low, half of that for `partial`, 0.1 for `fails` and 0 for a stopped idea. A partial run gets a small extra score for its repair steps, because it is close to done.
+
+A step runs on a copy of the last MVP. The referee writes tests for the step and keeps all earlier tests, so a step cannot lose what earlier runs proved. One idea gets at most two steps per session. If two steps in a row do not raise the reward, rigour closes the idea's open steps and writes "plateau: ready for a human decision" in its file. A step that fails with an error is closed and not retried.
+
+Every second scout call evolves ideas. It gets two or three parents: the best idea for each pair of track and problem, picked in proportion to their rewards. It must write one crossover of two parents, one mutation of one parent and one fresh idea. These ideas get the tag `evolved`, and `stats` compares their first-run reward with fresh ideas.
+
+## Memory
+
+rigour keeps three kinds of memory in the records:
+
+1. Episodes. Each run folder holds what happened, and `result.json` holds the verdict and the lessons.
+2. Claims. `knowledge.jsonl` holds short, general lessons, such as "sample sources over 200 MB". At the end of each session, the synth call reads tonight's runs, the most surprising first, and proposes changes: add, support, contradict, merge or retire a claim. rigour checks each change and applies only the valid ones. Each claim needs at least one run as evidence.
+3. Links. `graph.json` connects ideas through shared problems, data, repos and links. Synth can also merge two ideas that are the same idea. rigour never merges an idea that has a working prototype.
+
+A claim's score rises when runs confirm it, falls when runs contradict it, and decays with time. The store holds at most 60 claims, and the weakest one goes when a new one arrives. `KNOWLEDGE.md` shows the store for people to read.
+
+Surprise is the actual reward minus the triage forecast. `predictions.csv` logs both, and `stats` shows the forecast error. A falling error means that the loop knows its ideas better.
+
+## Statistics
+
+```
+py loop.py stats [days]
+```
+
+`stats` shows, for each day, the verdicts, the total reward, the USD-equivalent and the reward per USD. It also shows canary catch rates and near-duplicate drops. For each role, it shows the calls, the median and maximum seconds, the mean tokens and the calls that a limit stopped. Use it before and after you change a setting.
 
 ## Budgets and usage
 
@@ -184,6 +220,22 @@ Set caps in the `budget` setting:
 ```
 
 rigour checks the caps before it starts new work. `null` turns a cap off.
+
+Each call also has its own limits. These stop a step that hangs or loops:
+
+| Role | Minutes | USD-equivalent |
+|---|---|---|
+| `precheck`, `triage` | 5 | 0.20 |
+| `synth` | 5 | 0.30 |
+| `novelty1`, `novelty2`, `tiebreak` | 15 | 0.80 |
+| `scout` | 20 | 2.50 |
+| `referee_spec` | 20 | 2.00 |
+| `referee_judge` | 20 | 1.50 |
+| `builder` | 30 | 1.50 |
+
+The limits are about twice the largest call seen so far. To change one, add `minutes` or `max_usd` to that role in `rigour.json`. Claude Code applies `max_usd` with `--max-budget-usd`. Codex reports no cost, so it gets the time limit only. rigour also stops a call after 8 minutes with no output, for example a hung download. A stopped call still writes its log and its row in `metrics.csv`.
+
+Builders may download at most 200 MB. rigour does not copy files over 50 MB into the judge's folder, and it does not commit them. It adds them to the records `.gitignore` instead.
 
 - `session_usd` and `day_usd` use the USD-equivalent that Claude Code reports at list prices. On a subscription, this measures usage and is not a bill. Codex reports no cost, so these caps count Claude calls only.
 - `five_hour_pct` and `seven_day_pct` stop new work when an account reaches that share of its subscription limit.
@@ -207,9 +259,10 @@ A canary is an idea that the records already mark as dropped because it exists. 
 
 Each agent gets a small, fixed set of files:
 
-1. `DIGEST.md` has one line for each idea. A script builds it.
-2. `RELATED.md` has the top 5 matches for the task from a local BM25 index. It holds about 1500 characters. rigour also adds one line for each idea that `graph.json` links to those matches.
-3. `related/` holds copies of up to two related earlier MVPs. Only the builder gets it.
+1. `DIGEST.md` has one line for each live idea, the ids of dropped ideas and the open next steps. A script builds it.
+2. `RELATED.md` has the top 5 matches for the task from a local BM25 index. It holds about 1500 characters. rigour then spreads activation from those matches over `graph.json` (personalized PageRank) and adds up to 5 more ideas that share problems, data or links with them.
+3. `KNOWLEDGE.md` has up to 8 claims for the agent's role, about 1200 characters. The scout, triage, referee and builder get it.
+4. `related/` holds copies of up to two related earlier MVPs. Only the builder gets it.
 
 No agent gets the full history. Dropped ideas and failed runs stay in the index, so their lessons come back when a similar idea appears.
 
@@ -224,6 +277,9 @@ No agent gets the full history. Dropped ideas and failed runs stay in the index,
 | `runs/<date>-<id>/` | Novelty results, triage, the MVP, the verdict and `result.json` |
 | `DIGEST.md`, `INDEX.md`, `graph.json` | One line per idea, ideas by status, links between ideas |
 | `journal/` | One report per session |
+| `frontier.jsonl` | Next steps from verdicts, open or closed |
+| `knowledge.jsonl`, `KNOWLEDGE.md` | The claim store, and a readable copy |
+| `predictions.csv` | One row per triaged run: forecast, outcome and surprise |
 | `metrics.csv` | One row per agent call |
 | `calibration.csv` | One row per canary per agent |
 | `search.sqlite` | The BM25 index. rigour rebuilds it, so git ignores it. |
